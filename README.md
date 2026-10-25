@@ -15,10 +15,12 @@
 ## Instalasi
 
 ```bash
-npm install -g vibekit      # npm
-pnpm add -g vibekit         # pnpm
-npx vibekit ask "halo"      # tanpa install, langsung coba
+npm install -g @chispear/vibekit      # npm
+pnpm add -g @chispear/vibekit         # pnpm
+npx @chispear/vibekit ask "halo"      # tanpa install, langsung coba
 ```
+
+Setelah install global, perintahnya tetap `vibekit` (nama package-nya saja yang scoped).
 
 Butuh Node.js >= 18.
 
@@ -91,7 +93,7 @@ Keputusan repo: `dist/` masuk `.gitignore` dan dibangun saat publish (`prepublis
 
 ## Status Nama di npm
 
-Nama paket **`vibekit` di npm sudah terpakai** oleh proyek lain (per Oktober 2026). Sebelum publish, nama perlu diganti — mis. scoped package `@username/vibekit` atau nama turunan — keputusan ada pada pemilik repo. Nama perintah CLI tetap `vibekit`.
+Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
 
 ## Lisensi
 
