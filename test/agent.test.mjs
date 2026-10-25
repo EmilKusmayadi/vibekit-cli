@@ -51,6 +51,9 @@ function balasToolCalls(res, daftar, totalToken = 100) {
               id: `panggilan-${i + 1}`,
               type: "function",
               function: { name: d.nama, arguments: JSON.stringify(d.argumen) },
+              ...(d.tandaTangan
+                ? { extra_content: { google: { thought_signature: d.tandaTangan } } }
+                : {}),
             })),
           },
         },
@@ -92,7 +95,7 @@ test("(h) agent: tool_calls tulis_file → file tercipta persis, berakhir dengan
       // Pastikan definisi tools benar-benar dikirim ke penyedia.
       const terkirim = JSON.parse(body);
       assert.ok(Array.isArray(terkirim.tools) && terkirim.tools.length === 5, "router harus meneruskan 5 definisi tool");
-      balasToolCalls(res, [{ nama: "tulis_file", argumen: { path: "halo.txt", konten } }]);
+      balasToolCalls(res, [{ nama: "tulis_file", argumen: { path: "halo.txt", konten }, tandaTangan: "TANDA-UJI-123" }]);
     } else {
       balasTeks(res, "Selesai: file halo.txt dibuat.");
     }
@@ -122,6 +125,9 @@ test("(h) agent: tool_calls tulis_file → file tercipta persis, berakhir dengan
   assert.equal(tool.length, 1);
   assert.match(tool[0].content, /^OK:/);
   assert.equal(tool[0].tool_call_id, "panggilan-1");
+  // thought_signature dari penyedia (Gemini 3) harus diteruskan apa adanya pada
+  // riwayat panggilan berikutnya — tanpanya Gemini menolak dengan HTTP 400.
+  assert.match(tiruan.panggilan[1].body, /TANDA-UJI-123/);
 });
 
 test("(i) agent: konfirmasi menolak tulis_file → file tidak tercipta, loop tetap berakhir wajar", async () => {

@@ -25,6 +25,8 @@ export type HasilTanya =
       jawaban: string;
       /** Panggilan tool yang diminta model (bila respons berisi tool_calls). */
       toolCalls?: ToolCall[];
+      /** Pesan assistant mentah dari penyedia, untuk diteruskan apa adanya ke riwayat percakapan (Gemini 3 menyisipkan thought_signature di dalam tool_calls dan menolak riwayat tanpanya dengan HTTP 400). */
+      pesanMentah?: unknown;
       provider: ProviderConfig;
       tokenTerpakai: number;
       tokenSumber: "usage" | "estimasi";
@@ -274,7 +276,7 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
     return {
       ok: true,
       jawaban,
-      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(toolCalls.length > 0 ? { toolCalls, pesanMentah } : {}),
       provider,
       tokenTerpakai,
       tokenSumber,

@@ -18,7 +18,7 @@ import {
 import { formatAngka, hitungToken } from "./token.js";
 import type { ChatMessage, VibekitConfig } from "./types.js";
 
-const VERSI = "0.2.0";
+const VERSI = "0.2.1";
 const BATAS_TOKEN_RIWAYAT = 4000;
 
 function bantuan(): void {

@@ -331,11 +331,19 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
       return { ok: true, ringkasan: hasil.jawaban, jumlahLangkah: langkah, catatan };
     }
 
-    messages.push({
-      role: "assistant",
-      content: hasil.jawaban ? hasil.jawaban : null,
-      tool_calls: panggilan,
-    });
+    if (hasil.pesanMentah && typeof hasil.pesanMentah === "object") {
+      // Teruskan pesan assistant persis seperti yang dikirim penyedia. Gemini 3
+      // menyisipkan thought_signature di dalam tool_calls (extra_content) dan
+      // menolak permintaan berikutnya dengan HTTP 400 bila tanda tangan itu
+      // hilang dari riwayat — jadi pesan mentah tidak boleh dibangun ulang.
+      messages.push(hasil.pesanMentah as ChatMessage);
+    } else {
+      messages.push({
+        role: "assistant",
+        content: hasil.jawaban ? hasil.jawaban : null,
+        tool_calls: panggilan,
+      });
+    }
 
     for (const p of panggilan) {
       let argRingkas = "";
