@@ -6,6 +6,7 @@ import {
   muatConfig,
   statePath,
 } from "./config.js";
+import { jalankanAgent } from "./agent.js";
 import { bangunKonteks } from "./context.js";
 import { tanyaRouter, type HasilTanya } from "./router.js";
 import {
@@ -17,7 +18,7 @@ import {
 import { formatAngka, hitungToken } from "./token.js";
 import type { ChatMessage, VibekitConfig } from "./types.js";
 
-const VERSI = "0.1.0";
+const VERSI = "0.2.0";
 const BATAS_TOKEN_RIWAYAT = 4000;
 
 function bantuan(): void {
@@ -27,6 +28,7 @@ Penggunaan:
   vibekit init                          Buat ~/.vibekit/config.json dari template
   vibekit ask "<pertanyaan>" [opsi]     Tanya sekali lewat router
   vibekit chat                          Percakapan interaktif (perintah /keluar untuk berhenti)
+  vibekit do "<tugas>"                  Mode agent: kerjakan tugas dengan tool file/perintah di folder ini
   vibekit status                        Status & pemakaian token tiap penyedia hari ini
   vibekit --help                        Tampilkan bantuan ini
   vibekit --version                     Tampilkan versi
@@ -34,6 +36,13 @@ Penggunaan:
 Opsi ask:
   --file <path>    Lampirkan file sebagai konteks (boleh diulang)
   --dir <path>     Lampirkan isi folder sebagai konteks (boleh diulang)
+
+Mode agent (do):
+  Agent bekerja HANYA di folder tempat perintah dijalankan. Tool baca
+  (daftar_file, baca_file) berjalan langsung; tool yang mengubah sesuatu
+  (tulis_file, edit_file, jalankan_perintah) selalu meminta persetujuanmu
+  satu per satu — jawaban selain y/ya berarti ditolak. Batas 12 langkah.
+  Contoh: vibekit do "buatkan file halo.txt berisi sapaan, lalu tampilkan daftar file di sini"
 
 Cara kerja singkat:
   Penyedia dicoba sesuai urutan di konfigurasi. Bila kuota penyedia terdeteksi
@@ -204,6 +213,54 @@ async function perintahChat(): Promise<number> {
   return 0;
 }
 
+async function perintahDo(args: string[]): Promise<number> {
+  const tugas = args.join(" ").trim();
+  if (!tugas) {
+    console.error("[vibekit] Tugas kosong. Contoh: vibekit do \"buatkan file halo.txt berisi sapaan\"");
+    return 2;
+  }
+  let config: VibekitConfig;
+  try {
+    config = muatConfig().config;
+  } catch (e) {
+    console.error(`[vibekit] ${(e as Error).message}`);
+    return 2;
+  }
+  const cwd = process.cwd();
+  console.log(`VibeKit agent — folder kerja: ${cwd}`);
+  console.log(`Tugas: ${tugas}`);
+  console.log("Tool baca berjalan langsung; tulis/edit file dan jalankan perintah meminta persetujuanmu satu per satu.\n");
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const konfirmasi = (deskripsi: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      console.log(`\n[vibekit] Usulan aksi:\n${deskripsi}`);
+      rl.question("Jalankan? (y/N) ", (jawaban) => {
+        const j = jawaban.trim().toLowerCase();
+        resolve(j === "y" || j === "ya");
+      });
+    });
+
+  try {
+    const hasil = await jalankanAgent({
+      config,
+      tugas,
+      lokasiState: statePath(),
+      cwd,
+      konfirmasi,
+      jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+    });
+    for (const c of hasil.catatan) {
+      console.error(`[vibekit] dilewati ${c.nama}: ${c.alasan}`);
+    }
+    console.log(`\n— ringkasan agent (${hasil.jumlahLangkah} langkah) —`);
+    console.log(hasil.ringkasan);
+    return hasil.ok ? 0 : 1;
+  } finally {
+    rl.close();
+  }
+}
+
 function perintahStatus(): number {
   let config: VibekitConfig;
   try {
@@ -241,6 +298,8 @@ async function utama(): Promise<number> {
       return perintahAsk(sisa);
     case "chat":
       return perintahChat();
+    case "do":
+      return perintahDo(sisa);
     case "status":
       return perintahStatus();
     case "--version":

@@ -9,7 +9,7 @@ import {
   statePenyedia,
 } from "./state.js";
 import { formatAngka, hitungToken } from "./token.js";
-import type { ChatMessage, ProviderConfig, VibekitConfig } from "./types.js";
+import type { ChatMessage, ProviderConfig, ToolCall, ToolDefinition, VibekitConfig } from "./types.js";
 
 export interface CatatanPenyedia {
   nama: string;
@@ -23,6 +23,8 @@ export type HasilTanya =
   | {
       ok: true;
       jawaban: string;
+      /** Panggilan tool yang diminta model (bila respons berisi tool_calls). */
+      toolCalls?: ToolCall[];
       provider: ProviderConfig;
       tokenTerpakai: number;
       tokenSumber: "usage" | "estimasi";
@@ -65,6 +67,8 @@ interface OpsiTanya {
   /** Jeda antar percobaan ulang khusus HTTP 503 (server sibuk sesaat). Bawaan [3000, 8000] ms. */
   jedaRetry503Ms?: number[];
   tungguImpl?: (ms: number) => Promise<void>;
+  /** Definisi tool (function calling) yang ditawarkan ke model; diteruskan apa adanya ke body permintaan. */
+  tools?: ToolDefinition[];
 }
 
 /**
@@ -89,7 +93,7 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
 
   const system: ChatMessage = { role: "system", content: systemPromptHemat(opsi.config.gaya) };
   const semuaPesan = [system, ...opsi.messages];
-  const tokenPromptEstimasi = hitungToken(semuaPesan.map((m) => m.content).join("\n"));
+  const tokenPromptEstimasi = hitungToken(semuaPesan.map((m) => m.content ?? "").join("\n"));
 
   for (const provider of opsi.config.providers) {
     const entri = statePenyedia(state, provider.nama, sekarang);
@@ -141,6 +145,7 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
       model: provider.model,
       messages: semuaPesan,
       max_tokens: opsi.config.gaya.maksTokenJawaban,
+      ...(opsi.tools && opsi.tools.length > 0 ? { tools: opsi.tools } : {}),
       ...(provider.extraBody ?? {}),
     };
 
@@ -219,8 +224,26 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
       continue;
     }
 
-    const jawaban: string = data?.choices?.[0]?.message?.content ?? "";
-    if (!jawaban) {
+    const pesanMentah = data?.choices?.[0]?.message;
+    const jawaban: string = pesanMentah?.content ?? "";
+    const toolCallsMentah: unknown = pesanMentah?.tool_calls;
+    const toolCalls: ToolCall[] = Array.isArray(toolCallsMentah)
+      ? toolCallsMentah
+          .filter(
+            (t): t is ToolCall =>
+              !!t && typeof t === "object" && typeof (t as ToolCall).function?.name === "string"
+          )
+          .map((t, i) => ({
+            id: typeof t.id === "string" && t.id ? t.id : `panggilan-${i + 1}`,
+            type: "function" as const,
+            function: {
+              name: t.function.name,
+              arguments: typeof t.function.arguments === "string" ? t.function.arguments : JSON.stringify(t.function.arguments ?? {}),
+            },
+          }))
+      : [];
+    // Respons berisi tool_calls sah walau content kosong (mode agent).
+    if (!jawaban && toolCalls.length === 0) {
       const alasan = "respons tidak berisi jawaban (choices kosong)";
       entri.alasanTerakhir = alasan;
       simpanState(opsi.lokasiState, state);
@@ -238,7 +261,9 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
       tokenTerpakai = usage.prompt_tokens + usage.completion_tokens;
       tokenSumber = "usage";
     } else {
-      tokenTerpakai = tokenPromptEstimasi + hitungToken(jawaban);
+      // Estimasi juga menghitung argumen tool_calls (bagian dari keluaran model).
+      const teksTool = toolCalls.map((t) => `${t.function.name} ${t.function.arguments}`).join("\n");
+      tokenTerpakai = tokenPromptEstimasi + hitungToken(jawaban) + (teksTool ? hitungToken(teksTool) : 0);
       tokenSumber = "estimasi";
     }
 
@@ -246,7 +271,15 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
     entri.alasanTerakhir = null;
     simpanState(opsi.lokasiState, state);
 
-    return { ok: true, jawaban, provider, tokenTerpakai, tokenSumber, catatan };
+    return {
+      ok: true,
+      jawaban,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      provider,
+      tokenTerpakai,
+      tokenSumber,
+      catatan,
+    };
   }
 
   const baris = catatan.map((c) => {

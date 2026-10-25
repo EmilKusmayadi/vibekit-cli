@@ -63,8 +63,33 @@ vibekit status
 | `vibekit init` | Buat `~/.vibekit/config.json` dari template (tidak menimpa yang sudah ada) |
 | `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]...` | Tanya sekali; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
 | `vibekit chat` | Percakapan interaktif; riwayat dipangkas otomatis (maks ±4.000 token, giliran tertua dibuang); `/keluar` untuk berhenti |
+| `vibekit do "<tugas>"` | Mode agent: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah) |
 | `vibekit status` | Tabel per penyedia: model, status (aktif / cooldown s.d. jam / anggaran tercapai), token terpakai hari ini |
 | `vibekit --help` / `--version` | Bantuan / versi |
+
+## Mode Agent — `vibekit do`
+
+Selain menjawab pertanyaan, VibeKit bisa **mengerjakan tugas** di folder proyek Anda:
+
+```bash
+vibekit do "buatkan file halo.txt berisi sapaan, lalu tampilkan daftar file di sini"
+```
+
+Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yang sama, failover router yang sama), sampai ia membalas ringkasan akhir. Ada **5 tool**:
+
+| Tool | Fungsi | Konfirmasi? |
+|---|---|---|
+| `daftar_file` | Daftar isi folder | Tidak (baca-saja) |
+| `baca_file` | Baca isi file teks | Tidak (baca-saja) |
+| `tulis_file` | Buat/timpa file (folder induk dibuat bila perlu) | **Ya, satu per satu** |
+| `edit_file` | Ganti kemunculan pertama `teksLama` → `teksBaru` dalam file | **Ya, satu per satu** |
+| `jalankan_perintah` | Jalankan perintah shell (timeout 60 detik, keluaran ditangkap) | **Ya, satu per satu** |
+
+**Model keamanan:**
+
+- **Hanya folder kerja (cwd).** Semua path di-resolve terhadap folder tempat perintah dijalankan; path yang keluar dari folder itu (mis. `../`) ditolak eksekutor, bahkan bila pengguna menyetujui.
+- **Konfirmasi per aksi.** Setiap aksi yang mengubah file atau menjalankan perintah menampilkan deskripsi aksinya (path + pratinjau konten untuk tulis, potongan teks lama→baru untuk edit, perintah lengkap untuk shell) dan hanya berjalan bila Anda menjawab `y`/`ya` — selain itu dianggap menolak, dan penolakan itu dilaporkan ke model agar ia menyesuaikan rencana.
+- **Batas 12 langkah** per tugas, dan hasil tiap tool dipangkas (±4.000 karakter) sebelum dikirim balik ke model demi hemat token.
 
 ## Cara Failover Bekerja
 
@@ -93,7 +118,7 @@ Keputusan repo: `dist/` masuk `.gitignore` dan dibangun saat publish (`prepublis
 
 ## Status Nama di npm
 
-Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
+Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
 
 ## Lisensi
 

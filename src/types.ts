@@ -27,7 +27,35 @@ export interface VibekitConfig {
   gaya: GayaConfig;
 }
 
+/** Satu panggilan tool yang diminta model (format function calling OpenAI). */
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    /** Argumen sebagai string JSON (format bawaan API OpenAI-compatible). */
+    arguments: string;
+  };
+}
+
+/** Definisi tool yang ditawarkan ke model (format function calling OpenAI). */
+export interface ToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+  role: "system" | "user" | "assistant" | "tool";
+  /** Boleh null/kosong pada pesan assistant yang hanya berisi tool_calls. */
+  content: string | null;
+  /** Hanya untuk pesan assistant: daftar panggilan tool yang diminta model. */
+  tool_calls?: ToolCall[];
+  /** Hanya untuk pesan tool: id ToolCall yang dijawab pesan ini. */
+  tool_call_id?: string;
+  /** Hanya untuk pesan tool: nama tool yang dijalankan. */
+  name?: string;
 }
