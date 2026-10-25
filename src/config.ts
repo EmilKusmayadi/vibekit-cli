@@ -41,7 +41,7 @@ export const TEMPLATE_CONFIG: VibekitConfig = {
       nama: "gemini",
       baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
       apiKey: "",
-      model: "gemini-2.5-flash",
+      model: "gemini-3.8-flash",
       jedaCooldownMenit: 15,
     },
     {

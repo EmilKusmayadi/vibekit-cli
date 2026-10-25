@@ -36,7 +36,7 @@ Perintah ini membuat `~/.vibekit/config.json`:
 {
   "providers": [
     { "nama": "gpt",      "baseUrl": "https://api.openai.com/v1",                              "apiKey": "", "model": "gpt-4o-mini",     "anggaranHarian": 500000, "jedaCooldownMenit": 15 },
-    { "nama": "gemini",   "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/", "apiKey": "", "model": "gemini-2.5-flash", "jedaCooldownMenit": 15 },
+    { "nama": "gemini",   "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/", "apiKey": "", "model": "gemini-3.8-flash", "jedaCooldownMenit": 15 },
     { "nama": "deepseek", "baseUrl": "https://api.deepseek.com/v1",                            "apiKey": "", "model": "deepseek-chat",    "jedaCooldownMenit": 15 }
   ],
   "gaya": { "jawaban": "poin-penting", "maksTokenJawaban": 800 }
