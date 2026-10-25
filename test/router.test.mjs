@@ -230,3 +230,51 @@ test("(f) system prompt hemat + max_tokens dari gaya terkirim ke penyedia", asyn
   assert.equal(body.messages[0].role, "system");
   assert.match(body.messages[0].content, /poin-poin penting/i);
 });
+
+test("(g) HTTP 503 sesaat dicoba ulang ke penyedia yang sama lalu berhasil, tanpa cooldown", async () => {
+  let jumlah = 0;
+  const sibuk = await mulaiServer((req, res) => {
+    jumlah++;
+    if (jumlah < 3) {
+      balasError(res, 503, { error: { code: 503, message: "This model is currently experiencing high demand", status: "UNAVAILABLE" } });
+    } else {
+      balasChat(res, "jawaban setelah sibuk", 64);
+    }
+  });
+  const { lokasiState } = buatSementara();
+
+  const hasil = await tanyaRouter({
+    config: { providers: [penyedia("sibuk", sibuk.alamat)], ...GAYA },
+    messages: PESAN,
+    lokasiState,
+    jedaRetry503Ms: [1, 1],
+  });
+
+  assert.equal(hasil.ok, true);
+  assert.equal(hasil.provider.nama, "sibuk");
+  assert.equal(hasil.jawaban, "jawaban setelah sibuk");
+  assert.equal(sibuk.panggilan.length, 3, "503 harus dicoba ulang sampai 3 panggilan total");
+  const state = muatState(lokasiState);
+  assert.equal(statePenyedia(state, "sibuk").cooldownUntil, null, "503 tidak boleh memicu cooldown");
+});
+
+test("(g2) HTTP 503 terus-menerus → menyerah setelah 3 panggilan, tanpa cooldown, lanjut ke berikutnya", async () => {
+  const penuh = await mulaiServer((req, res) =>
+    balasError(res, 503, { error: { code: 503, message: "high demand", status: "UNAVAILABLE" } })
+  );
+  const cadangan = await mulaiServer((req, res) => balasChat(res, "jawaban cadangan", 10));
+  const { lokasiState } = buatSementara();
+
+  const hasil = await tanyaRouter({
+    config: { providers: [penyedia("penuh", penuh.alamat), penyedia("cadangan", cadangan.alamat)], ...GAYA },
+    messages: PESAN,
+    lokasiState,
+    jedaRetry503Ms: [1, 1],
+  });
+
+  assert.equal(hasil.ok, true);
+  assert.equal(hasil.provider.nama, "cadangan");
+  assert.equal(penuh.panggilan.length, 3, "penyedia 503 dicoba 1x + 2 retry lalu dilewati");
+  const state = muatState(lokasiState);
+  assert.equal(statePenyedia(state, "penuh").cooldownUntil, null, "503 tidak boleh memicu cooldown");
+});

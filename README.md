@@ -70,7 +70,7 @@ vibekit status
 
 1. Sebelum memanggil, router memeriksa state lokal (`~/.vibekit/state.json`): penyedia yang masih **cooldown** atau sudah mencapai **anggaran harian** dilewati tanpa dipanggil.
 2. Saat memanggil, permintaan berisi system prompt hemat sesuai `gaya.jawaban` dan `max_tokens` = `gaya.maksTokenJawaban`. Objek `extraBody` per penyedia (bila ada) digabung ke body — berguna untuk kenop khas model, mis. menekan penalaran.
-3. Bila respons menandakan kuota habis — HTTP **429/402** atau pola error `insufficient_quota` / `RESOURCE_EXHAUSTED` / saldo — penyedia ditandai **cooldown sampai akhir hari lokal** dan permintaan yang sama diulangi ke penyedia berikutnya. Rate-limit singkat (429 tanpa pola kuota) → cooldown `jedaCooldownMenit` (bawaan 15 menit).
+3. Bila respons menandakan kuota habis — HTTP **429/402** atau pola error `insufficient_quota` / `RESOURCE_EXHAUSTED` / saldo — penyedia ditandai **cooldown sampai akhir hari lokal** dan permintaan yang sama diulangi ke penyedia berikutnya. Rate-limit singkat (429 tanpa pola kuota) → cooldown `jedaCooldownMenit` (bawaan 15 menit). Khusus HTTP 503 (server penyedia sedang sibuk/penuh sesaat), penyedia yang sama dicoba ulang dulu sampai 2 kali dengan jeda 3 dan 8 detik, dan 503 tidak memicu cooldown.
 4. Error lain (401 kunci salah, 400, jaringan) **tidak** dianggap kuota habis: dicatat apa adanya dan router tetap mencoba penyedia berikutnya.
 5. Token terpakai dicatat dari field `usage` respons (atau estimasi tokenizer bila tidak ada). Bila semua penyedia gagal/habis, Anda menerima ringkasan status tiap penyedia dan jam paling awal untuk mencoba lagi.
 

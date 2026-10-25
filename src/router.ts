@@ -48,6 +48,9 @@ export function klasifikasiError(status: number, bodyTeks: string): { jenis: Jen
   if (status === 429) {
     return { jenis: "rate-limit", ringkas: `terkena rate-limit (HTTP 429) ${potongan}`.trim() };
   }
+  if (status === 503) {
+    return { jenis: "lainnya", ringkas: `server penyedia sedang sibuk/penuh (HTTP 503) ${potongan}`.trim() };
+  }
   return { jenis: "lainnya", ringkas: `HTTP ${status} ${potongan}`.trim() };
 }
 
@@ -59,6 +62,9 @@ interface OpsiTanya {
   fetchImpl?: typeof fetch;
   sekarang?: Date;
   timeoutMs?: number;
+  /** Jeda antar percobaan ulang khusus HTTP 503 (server sibuk sesaat). Bawaan [3000, 8000] ms. */
+  jedaRetry503Ms?: number[];
+  tungguImpl?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -67,12 +73,17 @@ interface OpsiTanya {
  * - Kuota habis (429/402/pola kuota) → cooldown sampai akhir hari lokal, lalu permintaan
  *   yang sama diulangi ke penyedia berikutnya secara transparan.
  * - Rate-limit singkat → cooldown jedaCooldownMenit (bawaan 15).
+ * - HTTP 503 (server penyedia sibuk sesaat) → penyedia yang sama dicoba ulang sampai
+ *   2 kali dengan jeda (3 dtk, 8 dtk) sebelum menyerah ke penyedia berikutnya;
+ *   503 tidak memicu cooldown.
  * - Error lain (401, 400, jaringan) tidak dianggap kuota habis; dicatat dan lanjut ke berikutnya.
  */
 export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
   const fetchImpl = opsi.fetchImpl ?? fetch;
   const sekarang = opsi.sekarang ?? new Date();
   const timeoutMs = opsi.timeoutMs ?? 90_000;
+  const jedaRetry503 = opsi.jedaRetry503Ms ?? [3000, 8000];
+  const tunggu = opsi.tungguImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const state = muatState(opsi.lokasiState);
   const catatan: CatatanPenyedia[] = [];
 
@@ -133,32 +144,49 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
       ...(provider.extraBody ?? {}),
     };
 
-    let respons: Response;
-    try {
-      const kontroler = new AbortController();
-      const pengatur = setTimeout(() => kontroler.abort(), timeoutMs);
+    let respons: Response | undefined;
+    let teks = "";
+    let gagalJaringan: string | null = null;
+    let percobaan503 = 0;
+    for (;;) {
       try {
-        respons = await fetchImpl(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify(body),
-          signal: kontroler.signal,
-        });
-      } finally {
-        clearTimeout(pengatur);
+        const kontroler = new AbortController();
+        const pengatur = setTimeout(() => kontroler.abort(), timeoutMs);
+        try {
+          respons = await fetchImpl(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify(body),
+            signal: kontroler.signal,
+          });
+        } finally {
+          clearTimeout(pengatur);
+        }
+      } catch (e) {
+        gagalJaringan = `gagal jaringan: ${(e as Error).message}`;
+        break;
       }
-    } catch (e) {
-      const alasan = `gagal jaringan: ${(e as Error).message}`;
+      teks = await respons.text();
+      // 503 = server penyedia sedang penuh sesaat: coba ulang penyedia yang sama
+      // dengan jeda sebelum menyerah ke penyedia berikutnya.
+      if (respons.status === 503 && percobaan503 < jedaRetry503.length) {
+        await tunggu(jedaRetry503[percobaan503]);
+        percobaan503++;
+        continue;
+      }
+      break;
+    }
+
+    if (gagalJaringan !== null || !respons) {
+      const alasan = gagalJaringan ?? "gagal jaringan";
       entri.alasanTerakhir = alasan;
       simpanState(opsi.lokasiState, state);
       catatan.push({ nama: provider.nama, model: provider.model, status: "gagal", alasan });
       continue;
     }
-
-    const teks = await respons.text();
 
     if (!respons.ok) {
       const { jenis, ringkas } = klasifikasiError(respons.status, teks);
