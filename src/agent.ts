@@ -124,7 +124,7 @@ export const SYSTEM_PROMPT_GABUNGAN = [
   "Semua path bersifat relatif terhadap folder kerja; jangan pernah mencoba mengakses apa pun di luar folder itu.",
   "Aksi tulis_file, edit_file, dan jalankan_perintah selalu meminta persetujuan pengguna dulu; bila pengguna menolak, jangan memaksa dan jangan mengulang aksi yang sama.",
   "Jangan mengarang isi file: gunakan daftar_file/baca_file dulu bila perlu mengetahui isi folder/file.",
-  "Setelah bertindak, tutup giliran dengan balasan teks (tanpa tool) berisi ringkasan singkat: apa yang dilakukan dan hasilnya.",
+  "Setelah bertindak, tutup giliran dengan balasan teks (tanpa tool) berisi ringkasan singkat: apa yang dilakukan dan hasilnya. Ringkasan itu TIDAK BOLEH mengulang isi file yang ditulis atau dibaca — cukup sebutkan nama file dan hasilnya.",
 ].join(" ");
 
 /**
@@ -168,9 +168,14 @@ function argumenRingkas(nama: string, arg: Record<string, unknown>): string {
   }
 }
 
+/** Nama tool yang mengubah sesuatu — wajib konfirmasi kecuali mode auto-allow. */
+const TOOL_MUTASI = new Set(["tulis_file", "edit_file", "jalankan_perintah"]);
+
 interface KonteksEksekusi {
   cwd: string;
   konfirmasi: Konfirmasi;
+  /** true = mode auto-allow: callback konfirmasi TIDAK PERNAH dipanggil. */
+  autoAllow?: boolean;
 }
 
 /**
@@ -187,6 +192,10 @@ export async function eksekusiTool(panggilan: ToolCall, konteks: KonteksEksekusi
     return `ERROR: argumen untuk tool ${nama} bukan JSON yang valid.`;
   }
   const { cwd, konfirmasi } = konteks;
+  // Mode auto-allow: callback konfirmasi pengguna tidak dipanggil sama sekali —
+  // aksi mutasi langsung disetujui. Pagar cwd (resolusiAman) TIDAK berubah dan
+  // tetap menolak path traversal walau auto-allow aktif.
+  const konfirmasiEfektif: Konfirmasi = konteks.autoAllow ? async () => true : konfirmasi;
   const ambilPath = (mentah: unknown): { tujuan: string; rel: string } | { error: string } => {
     const masukan = typeof mentah === "string" && mentah.trim() !== "" ? mentah : ".";
     const tujuan = resolusiAman(cwd, masukan);
@@ -221,7 +230,7 @@ export async function eksekusiTool(panggilan: ToolCall, konteks: KonteksEksekusi
         const deskripsi =
           `tulis_file → ${p.rel} (${konten.length} karakter)\n` +
           `Pratinjau konten:\n${potong(konten, 300)}`;
-        if (!(await konfirmasi(deskripsi))) {
+        if (!(await konfirmasiEfektif(deskripsi))) {
           return `DITOLAK: pengguna menolak aksi tulis_file ke ${p.rel}. File tidak ditulis. Jangan mengulang aksi yang sama; sesuaikan rencana atau akhiri dengan ringkasan.`;
         }
         await fs.mkdir(path.dirname(p.tujuan), { recursive: true });
@@ -242,7 +251,7 @@ export async function eksekusiTool(panggilan: ToolCall, konteks: KonteksEksekusi
           `edit_file → ${p.rel}\n` +
           `Teks lama: ${potong(teksLama, 150)}\n` +
           `Teks baru: ${potong(teksBaru, 150)}`;
-        if (!(await konfirmasi(deskripsi))) {
+        if (!(await konfirmasiEfektif(deskripsi))) {
           return `DITOLAK: pengguna menolak aksi edit_file di ${p.rel}. File tidak diubah. Jangan mengulang aksi yang sama; sesuaikan rencana atau akhiri dengan ringkasan.`;
         }
         const baru = isi.slice(0, idx) + teksBaru + isi.slice(idx + teksLama.length);
@@ -253,7 +262,7 @@ export async function eksekusiTool(panggilan: ToolCall, konteks: KonteksEksekusi
         const perintah = typeof arg.perintah === "string" ? arg.perintah.trim() : "";
         if (!perintah) return "ERROR: argumen perintah kosong.";
         const deskripsi = `jalankan_perintah → ${perintah}`;
-        if (!(await konfirmasi(deskripsi))) {
+        if (!(await konfirmasiEfektif(deskripsi))) {
           return `DITOLAK: pengguna menolak menjalankan perintah "${perintah}". Perintah tidak dijalankan. Jangan mengulang aksi yang sama; sesuaikan rencana atau akhiri dengan ringkasan.`;
         }
         const hasil = await new Promise<{ kode: number | null; stdout: string; stderr: string; timeout: boolean }>(
@@ -304,6 +313,11 @@ export interface OpsiGiliran {
   /** Folder kerja: satu-satunya wilayah yang boleh disentuh tool. */
   cwd: string;
   konfirmasi: Konfirmasi;
+  /**
+   * Mode auto-allow: aksi mutasi (tulis_file/edit_file/jalankan_perintah)
+   * langsung dijalankan tanpa meminta konfirmasi. Pagar cwd tetap berlaku.
+   */
+  autoAllow?: boolean;
   fetchImpl?: typeof fetch;
   /** Batas jumlah panggilan model dalam satu giliran (bawaan 12). */
   maksLangkah?: number;
@@ -414,8 +428,13 @@ export async function jalankanGiliran(opsi: OpsiGiliran): Promise<HasilGiliran> 
       } catch {
         argRingkas = "";
       }
-      opsi.jejak?.(`langkah ${langkah}: ${p.function.name}${argRingkas ? ` (${argRingkas})` : ""}`);
-      const hasilTool = await eksekusiTool(p, { cwd: opsi.cwd, konfirmasi: opsi.konfirmasi });
+      const penandaAuto = opsi.autoAllow && TOOL_MUTASI.has(p.function.name) ? " (auto)" : "";
+      opsi.jejak?.(`langkah ${langkah}: ${p.function.name}${argRingkas ? ` (${argRingkas})` : ""}${penandaAuto}`);
+      const hasilTool = await eksekusiTool(p, {
+        cwd: opsi.cwd,
+        konfirmasi: opsi.konfirmasi,
+        autoAllow: opsi.autoAllow,
+      });
       opsi.jejak?.(`  → ${potong(hasilTool.split("\n")[0], 120)}`);
       messages.push({
         role: "tool",
@@ -481,6 +500,106 @@ export function pangkasRiwayatAman(messages: ChatMessage[], maksToken: number): 
   return [...awalan, ...grup.flat()];
 }
 
+/** Target ringkas satu panggilan tool untuk pesan ringkasan kompaksi. */
+function targetRingkasTool(panggilan: ToolCall): string {
+  let arg: Record<string, unknown> = {};
+  try {
+    arg = JSON.parse(panggilan.function.arguments || "{}") as Record<string, unknown>;
+  } catch {
+    // Argumen rusak: target dikosongkan, ringkasan tetap dibuat dari nama tool.
+  }
+  if (panggilan.function.name === "jalankan_perintah") {
+    return potong(String(arg.perintah ?? ""), 40);
+  }
+  return String(arg.path ?? ".");
+}
+
+/** Status satu hasil tool dari awalannya: "OK" | "ERROR" | "DITOLAK" | kata pertama. */
+function statusHasilTool(konten: string | null): string {
+  const t = (konten ?? "").trimStart();
+  if (t.startsWith("OK")) return "OK";
+  if (t.startsWith("ERROR")) return "ERROR";
+  if (t.startsWith("DITOLAK")) return "DITOLAK";
+  return t.split(/[:\s]/)[0] || "?";
+}
+
+/** Padatkan satu giliran LAMA (bukan giliran terakhir) — lihat kompaksiRiwayatAksi. */
+function kompaksiSatuGiliran(giliran: ChatMessage[]): ChatMessage[] {
+  const keluar: ChatMessage[] = [];
+  let i = 0;
+  while (i < giliran.length) {
+    const m = giliran[i];
+    if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+      // Kumpulkan pesan-pesan tool milik rangkaian ini.
+      const hasilTool: ChatMessage[] = [];
+      let j = i + 1;
+      while (j < giliran.length && giliran[j].role === "tool") {
+        hasilTool.push(giliran[j]);
+        j++;
+      }
+      // Teks pendamping pada pesan assistant (jarang ada) dipertahankan.
+      if (typeof m.content === "string" && m.content.trim() !== "") {
+        keluar.push({ role: "assistant", content: m.content });
+      }
+      // Satu pesan ringkasan per panggilan tool, menggantikan seluruh
+      // rangkaian — argumen lengkap (termasuk isi file) dan thought_signature
+      // ikut terbuang di sini, memang itu tujuannya (hemat token).
+      for (const p of m.tool_calls) {
+        const pasangan = hasilTool.find((t) => t.tool_call_id === p.id) ?? hasilTool[0];
+        const status = statusHasilTool(pasangan?.content ?? null);
+        const target = targetRingkasTool(p);
+        keluar.push({
+          role: "assistant",
+          content: `[Aksi selesai: ${p.function.name}${target ? ` ${target}` : ""} — ${status}]`,
+        });
+      }
+      i = j;
+    } else if (m.role === "tool") {
+      // Pesan tool yatim tanpa rangkaian assistant pendahulu dalam giliran
+      // yang sama: buang (tidak sah dikirim ke API tanpa pendahulunya).
+      i++;
+    } else {
+      keluar.push(m);
+      i++;
+    }
+  }
+  return keluar;
+}
+
+/**
+ * Kompaksi riwayat aksi untuk chat: ganti rangkaian tool pada giliran-giliran
+ * LAMA menjadi ringkasan teks satu baris, agar isi file yang ditulis model
+ * (argumen tool_calls) tidak ikut dikirim ulang ke API pada setiap giliran
+ * berikutnya. Bentuk ringkasan: `[Aksi selesai: <tool> <target> — <status>]`.
+ *
+ * Aturan keras:
+ * - Giliran TERAKHIR tidak disentuh sama sekali — pesan assistant mentahnya
+ *   (termasuk thought_signature Gemini di dalam tool_calls) wajib utuh
+ *   selama giliran itu masih aktif/baru selesai.
+ * - Pesan sebelum "user" pertama (mis. system) dipertahankan apa adanya.
+ * - Pesan user dan assistant teks biasa dipertahankan apa adanya.
+ * - Mengembalikan array BARU; array masukan tidak diubah.
+ */
+export function kompaksiRiwayatAksi(messages: ChatMessage[]): ChatMessage[] {
+  let awal = 0;
+  while (awal < messages.length && messages[awal].role !== "user") awal++;
+  const awalan = messages.slice(0, awal);
+  const sisa = messages.slice(awal);
+
+  const grup: ChatMessage[][] = [];
+  for (const m of sisa) {
+    if (m.role === "user" || grup.length === 0) grup.push([m]);
+    else grup[grup.length - 1].push(m);
+  }
+
+  const hasil: ChatMessage[] = [...awalan];
+  grup.forEach((giliran, gi) => {
+    if (gi === grup.length - 1) hasil.push(...giliran);
+    else hasil.push(...kompaksiSatuGiliran(giliran));
+  });
+  return hasil;
+}
+
 export interface OpsiAgent {
   config: VibekitConfig;
   /** Tugas dalam bahasa alami dari pengguna. */
@@ -489,6 +608,8 @@ export interface OpsiAgent {
   /** Folder kerja: satu-satunya wilayah yang boleh disentuh tool. */
   cwd: string;
   konfirmasi: Konfirmasi;
+  /** Mode auto-allow: lewati semua konfirmasi aksi mutasi (pagar cwd tetap). */
+  autoAllow?: boolean;
   fetchImpl?: typeof fetch;
   /** Batas jumlah panggilan model (bawaan 12). */
   maksLangkah?: number;
@@ -520,6 +641,7 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
     lokasiState: opsi.lokasiState,
     cwd: opsi.cwd,
     konfirmasi: opsi.konfirmasi,
+    autoAllow: opsi.autoAllow,
     fetchImpl: opsi.fetchImpl,
     maksLangkah: opsi.maksLangkah,
     jejak: opsi.jejak,

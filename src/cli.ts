@@ -9,6 +9,7 @@ import {
 import {
   jalankanAgent,
   jalankanGiliran,
+  kompaksiRiwayatAksi,
   pangkasRiwayatAman,
   SYSTEM_PROMPT_GABUNGAN,
   type Konfirmasi,
@@ -24,7 +25,7 @@ import {
 import { formatAngka } from "./token.js";
 import type { ChatMessage, VibekitConfig } from "./types.js";
 
-const VERSI = "0.3.0";
+const VERSI = "0.4.0";
 const BATAS_TOKEN_RIWAYAT = 4000;
 
 function bantuan(): void {
@@ -42,6 +43,12 @@ Penggunaan:
 Opsi ask:
   --file <path>    Lampirkan file sebagai konteks (boleh diulang)
   --dir <path>     Lampirkan isi folder sebagai konteks (boleh diulang)
+  --auto, --yes    Mode auto-allow: aksi tulis/perintah langsung dijalankan
+                   tanpa persetujuan (tetap terkunci di folder kerja)
+
+Opsi chat & do:
+  --auto, --yes    Mode auto-allow seperti di atas. Di tengah sesi chat,
+                   perintah /auto menyalakan/mematikan mode ini kapan saja.
 
 Kemampuan agent (ask, chat, do):
   Sejak v0.3.0 ketiga perintah itu bisa bertindak, bukan hanya menjawab:
@@ -50,6 +57,9 @@ Kemampuan agent (ask, chat, do):
   baca_file) berjalan langsung; tool yang mengubah sesuatu (tulis_file,
   edit_file, jalankan_perintah) selalu meminta persetujuanmu satu per satu
   — jawaban selain y/ya berarti ditolak. Batas 12 langkah per giliran.
+  Mode auto-allow (--auto/--yes, atau /auto di chat) melewati persetujuan
+  itu: semua aksi langsung dijalankan, pagar folder kerja tetap berlaku.
+  Hanya aktifkan di folder yang aman dan untuk tugas yang kamu percayai.
   Perbedaannya: ask = satu pertanyaan yang boleh berakhir dengan aksi,
   chat = percakapan yang bisa bertindak di tengah obrolan,
   do = mode tugas sekali jalan dengan jejak langkah & ringkasan akhir.
@@ -77,16 +87,25 @@ function perintahInit(): number {
   return 0;
 }
 
+/** Satu baris peringatan yang dicetak di awal perintah saat mode auto-allow aktif. */
+function cetakPeringatanAuto(): void {
+  console.error(
+    "[vibekit] Mode auto-allow AKTIF: aksi tulis file & menjalankan perintah akan dijalankan TANPA persetujuanmu. Agent tetap terkunci di folder kerja ini."
+  );
+}
+
 interface OpsiAsk {
   pertanyaan: string;
   files: string[];
   dirs: string[];
+  auto: boolean;
 }
 
 function uraiArgAsk(args: string[]): OpsiAsk | { error: string } {
   const files: string[] = [];
   const dirs: string[] = [];
   const sisa: string[] = [];
+  let auto = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--file") {
@@ -101,13 +120,15 @@ function uraiArgAsk(args: string[]): OpsiAsk | { error: string } {
       files.push(a.slice("--file=".length));
     } else if (a.startsWith("--dir=")) {
       dirs.push(a.slice("--dir=".length));
+    } else if (a === "--auto" || a === "--yes") {
+      auto = true;
     } else {
       sisa.push(a);
     }
   }
   const pertanyaan = sisa.join(" ").trim();
   if (!pertanyaan) return { error: "Pertanyaan kosong. Contoh: vibekit ask \"apa itu API?\"" };
-  return { pertanyaan, files, dirs };
+  return { pertanyaan, files, dirs, auto };
 }
 
 /**
@@ -198,6 +219,7 @@ async function perintahAsk(args: string[]): Promise<number> {
     { role: "system", content: SYSTEM_PROMPT_GABUNGAN },
     { role: "user", content: isiUser },
   ];
+  if (urai.auto) cetakPeringatanAuto();
   const pembaca = buatPembacaBaris();
   try {
     const hasil = await jalankanGiliran({
@@ -206,6 +228,7 @@ async function perintahAsk(args: string[]): Promise<number> {
       lokasiState: statePath(),
       cwd: process.cwd(),
       konfirmasi: buatKonfirmasi(pembaca),
+      autoAllow: urai.auto,
       jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
     });
     if (!hasil.ok) {
@@ -234,7 +257,7 @@ async function perintahAsk(args: string[]): Promise<number> {
   }
 }
 
-async function perintahChat(): Promise<number> {
+async function perintahChat(args: string[]): Promise<number> {
   let config: VibekitConfig;
   try {
     config = muatConfig().config;
@@ -242,8 +265,13 @@ async function perintahChat(): Promise<number> {
     console.error(`[vibekit] ${(e as Error).message}`);
     return 2;
   }
+  // Mode auto-allow bisa dinyalakan dari flag --auto/--yes, lalu diubah
+  // kapan saja di tengah sesi dengan perintah /auto.
+  let autoAktif = args.includes("--auto") || args.includes("--yes");
   console.log("VibeKit chat — ketik pertanyaan, /keluar untuk berhenti.");
   console.log("Chat ini juga bisa bertindak: minta saja dibuatkan file atau menjalankan perintah — setiap aksi meminta persetujuanmu dulu.");
+  console.log("Perintah /auto menyalakan/mematikan mode auto-allow (aksi tanpa persetujuan) di tengah sesi.");
+  if (autoAktif) cetakPeringatanAuto();
   const riwayat: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT_GABUNGAN }];
   const pembaca = buatPembacaBaris();
   const konfirmasi = buatKonfirmasi(pembaca);
@@ -254,9 +282,25 @@ async function perintahChat(): Promise<number> {
       const baris = barisMentah.trim();
       if (baris === "/keluar" || baris === "/exit") break;
       if (!baris) continue;
+      if (baris === "/auto") {
+        autoAktif = !autoAktif;
+        console.log(
+          autoAktif
+            ? "[vibekit] Mode auto-allow: AKTIF — aksi tulis file & menjalankan perintah berikutnya dijalankan TANPA persetujuan. Agent tetap terkunci di folder kerja ini."
+            : "[vibekit] Mode auto-allow: NONAKTIF — aksi tulis file & menjalankan perintah kembali meminta persetujuanmu satu per satu."
+        );
+        continue;
+      }
       riwayat.push({ role: "user", content: baris });
 
-      // Pangkas SADAR-TOOL: hanya pada batas giliran utuh, tidak pernah
+      // Kompaksi riwayat aksi DULU: rangkaian tool giliran-giliran lama
+      // diganti ringkasan satu baris agar isi file tidak terkirim ulang.
+      // Giliran terakhir (yang baru saja ditambahkan pesan user-nya ini
+      // menjadi giliran terakhir) tidak disentuh kompaksi.
+      const terkompaksi = kompaksiRiwayatAksi(riwayat);
+      riwayat.splice(0, riwayat.length, ...terkompaksi);
+
+      // Lalu Pangkas SADAR-TOOL: hanya pada batas giliran utuh, tidak pernah
       // menyisakan pesan tool yatim atau tool_calls tanpa hasilnya.
       const terpotong = pangkasRiwayatAman(riwayat, BATAS_TOKEN_RIWAYAT);
       riwayat.splice(0, riwayat.length, ...terpotong);
@@ -267,6 +311,7 @@ async function perintahChat(): Promise<number> {
         lokasiState: statePath(),
         cwd: process.cwd(),
         konfirmasi,
+        autoAllow: autoAktif,
         jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
       });
       if (hasil.ok) {
@@ -295,7 +340,11 @@ async function perintahChat(): Promise<number> {
 }
 
 async function perintahDo(args: string[]): Promise<number> {
-  const tugas = args.join(" ").trim();
+  const auto = args.includes("--auto") || args.includes("--yes");
+  const tugas = args
+    .filter((a) => a !== "--auto" && a !== "--yes")
+    .join(" ")
+    .trim();
   if (!tugas) {
     console.error("[vibekit] Tugas kosong. Contoh: vibekit do \"buatkan file halo.txt berisi sapaan\"");
     return 2;
@@ -310,7 +359,11 @@ async function perintahDo(args: string[]): Promise<number> {
   const cwd = process.cwd();
   console.log(`VibeKit agent — folder kerja: ${cwd}`);
   console.log(`Tugas: ${tugas}`);
-  console.log("Tool baca berjalan langsung; tulis/edit file dan jalankan perintah meminta persetujuanmu satu per satu.\n");
+  if (auto) {
+    cetakPeringatanAuto();
+  } else {
+    console.log("Tool baca berjalan langsung; tulis/edit file dan jalankan perintah meminta persetujuanmu satu per satu.\n");
+  }
 
   const pembaca = buatPembacaBaris();
   const konfirmasi = buatKonfirmasi(pembaca);
@@ -322,6 +375,7 @@ async function perintahDo(args: string[]): Promise<number> {
       lokasiState: statePath(),
       cwd,
       konfirmasi,
+      autoAllow: auto,
       jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
     });
     for (const c of hasil.catatan) {
@@ -371,7 +425,7 @@ async function utama(): Promise<number> {
     case "ask":
       return perintahAsk(sisa);
     case "chat":
-      return perintahChat();
+      return perintahChat(sisa);
     case "do":
       return perintahDo(sisa);
     case "status":

@@ -61,8 +61,8 @@ vibekit status
 | Perintah | Fungsi |
 |---|---|
 | `vibekit init` | Buat `~/.vibekit/config.json` dari template (tidak menimpa yang sudah ada) |
-| `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]...` | Satu pertanyaan yang boleh berakhir dengan aksi; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
-| `vibekit chat` | Percakapan interaktif yang juga bisa bertindak di tengah obrolan; riwayat dipangkas otomatis dan sadar-tool (maks ±4.000 token, hanya pada batas giliran utuh); `/keluar` untuk berhenti |
+| `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]... [--auto]` | Satu pertanyaan yang boleh berakhir dengan aksi; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
+| `vibekit chat [--auto]` | Percakapan interaktif yang juga bisa bertindak di tengah obrolan; riwayat aksi lama dipadatkan jadi ringkasan lalu dipangkas sadar-tool (maks ±4.000 token, hanya pada batas giliran utuh); `/keluar` untuk berhenti, `/auto` untuk menyala-matikan mode auto-allow |
 | `vibekit do "<tugas>"` | Mode agent sekali jalan: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah) |
 | `vibekit status` | Tabel per penyedia: model, status (aktif / cooldown s.d. jam / anggaran tercapai), token terpakai hari ini |
 | `vibekit --help` / `--version` | Bantuan / versi |
@@ -93,6 +93,7 @@ Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yan
 
 - **Hanya folder kerja (cwd).** Semua path di-resolve terhadap folder tempat perintah dijalankan; path yang keluar dari folder itu (mis. `../`) ditolak eksekutor, bahkan bila pengguna menyetujui.
 - **Konfirmasi per aksi.** Setiap aksi yang mengubah file atau menjalankan perintah menampilkan deskripsi aksinya (path + pratinjau konten untuk tulis, potongan teks lama→baru untuk edit, perintah lengkap untuk shell) dan hanya berjalan bila Anda menjawab `y`/`ya` — selain itu dianggap menolak, dan penolakan itu dilaporkan ke model agar ia menyesuaikan rencana.
+- **Mode auto-allow (opsional, sejak v0.4.0).** Flag `--auto` (alias `--yes`) pada `ask`, `chat`, dan `do` — atau perintah `/auto` di tengah sesi chat — melewati konfirmasi per aksi: semua aksi tulis/perintah langsung dijalankan. Pagar folder kerja TIDAK ikut dilepas (path traversal tetap ditolak), tetapi risikonya nyata: model bisa menulis atau menjalankan sesuatu tanpa sempat Anda periksa. Hanya aktifkan di folder yang aman (folder uji, proyek sekali pakai) dan untuk tugas yang Anda percayai.
 - **Batas 12 langkah** per giliran/tugas, dan hasil tiap tool dipangkas (±4.000 karakter) sebelum dikirim balik ke model demi hemat token.
 - **Riwayat chat yang aman untuk tool.** Pemangkasan riwayat chat hanya terjadi pada batas giliran utuh (satu pesan pengguna + seluruh rangkaian tool-nya), sehingga tidak pernah ada pesan hasil tool yang yatim atau panggilan tool yang kehilangan hasilnya.
 
@@ -109,6 +110,7 @@ Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yan
 - **System prompt ringkas** — gaya `poin-penting` memerintahkan model menjawab hanya poin penting tanpa basa-basi; tersedia juga `normal` dan `detail`.
 - **Batas jawaban keras** — `maksTokenJawaban` menjadi `max_tokens` di setiap permintaan.
 - **Konteks terseleksi** — `--file/--dir` melewati file biner & file > 256 KB, memangkas baris komentar penuh dan baris kosong berlebih, dan membatasi total konteks (±16.000 token) dengan memotong berkas terbesar. Selisih token mentah vs terseleksi selalu ditampilkan.
+- **Kompaksi riwayat aksi (chat)** — rangkaian tool giliran-giliran lama dipadatkan menjadi ringkasan satu baris (`[Aksi selesai: tulis_file index.html — OK]`) sebelum giliran baru dimulai, jadi isi file yang pernah ditulis/dibaca model tidak dikirim ulang ke API di setiap giliran. Giliran terakhir tidak pernah disentuh kompaksi, sehingga `thought_signature` Gemini tetap utuh selama dibutuhkan.
 - **Anggaran & pencatatan** — pemakaian per penyedia per hari terlihat di `vibekit status`, sehingga boros selalu kelihatan.
 
 ## Pengembangan
