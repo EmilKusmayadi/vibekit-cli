@@ -78,6 +78,7 @@ vibekit status
 | `vibekit chat [--auto] [--lanjut] [--tanpa-brief]` | Percakapan interaktif yang juga bisa bertindak di tengah obrolan; riwayat aksi lama dipadatkan jadi ringkasan lalu dipangkas sadar-tool (maks ±4.000 token, hanya pada batas giliran utuh); `/keluar` untuk berhenti, `/auto` untuk menyala-matikan mode auto-allow, `/sesi` menampilkan id sesi aktif. Sesi tersimpan otomatis dan bisa dilanjutkan dengan `--lanjut` |
 | `vibekit do "<tugas>" [--auto] [--rencana] [--tanpa-brief]` | Mode agent sekali jalan: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah). `--rencana`: susun rencana dulu, persetujuan SATU kali, lalu eksekusi |
 | `vibekit mcp` | Sambungkan semua server MCP dari konfigurasi dan daftar tool yang mereka sediakan (lihat bagian Dukungan MCP di bawah) |
+| `vibekit layani [--port <n>] [--host <h>] [--token <t>] [--auto]` | Jalankan VibeKit sebagai **server MCP** yang melayani folder saat ini ke agen AI eksternal (token Bearer + konfirmasi terminal; lihat bagian VibeKit Layani di bawah) |
 | `vibekit brief` | Susun ringkasan konteks proyek ke `.vibekit/brief.md`; brief dipakai otomatis sebagai konteks pada ask/chat/do (lihat bagian Brief Proyek) |
 | `vibekit hemat` | Laporan pemakaian token per penyedia (hari ini & 7 hari terakhir) + token yang terukur dihemat kompaksi riwayat |
 | `vibekit sesi` | Daftar sesi chat yang tersimpan (untuk dilanjutkan dengan `chat --lanjut`) |
@@ -166,6 +167,47 @@ Perintah ini menyambungkan semua server di `mcpServers`, mencetak daftar tool pe
 ### Keamanan tool MCP
 
 Tool MCP adalah **aksi pihak ketiga** yang dijalankan atas nama Anda, jadi perlakuannya sama dengan tool mutasi bawaan: **selalu meminta konfirmasi Anda satu per satu** (pratinjau menampilkan nama tool + argumennya), dan penolakan dilaporkan ke model. Mode auto-allow (`--auto`/`--yes`/`/auto`) melewati konfirmasi itu juga untuk tool MCP — aktifkan hanya bila Anda mempercayai server MCP yang terdaftar dan tugasnya. Sambungkan hanya server MCP yang Anda kenal sumbernya.
+
+## VibeKit Layani — `vibekit layani` (server MCP)
+
+Arah sebaliknya dari dukungan MCP di atas: perintah ini membuat VibeKit menjadi **server MCP** yang melayani folder tempat perintah dijalankan kepada agen AI eksternal — misalnya asisten **Muse** (lewat konektor khusus), atau client MCP lain yang mendukung transport Streamable HTTP. Agen itu bisa memakai kelima tool mode agent (`daftar_file`, `baca_file`, `tulis_file`, `edit_file`, `jalankan_perintah`) langsung di folder proyek Anda, seolah-olah ia duduk di komputer Anda — padahal ia berjalan dari jarak jauh.
+
+```bash
+cd folder/proyek/anda
+vibekit layani
+```
+
+Saat pertama kali dijalankan, sebuah **token** dibuat otomatis dan disimpan di `~/.vibekit/config.json` (field `layani.token`). Server mencetak alamat + tokennya; daftarkan keduanya pada agen/client Anda sebagai server MCP Streamable HTTP dengan header `Authorization: Bearer <token>`. Contoh entri pada konfigurasi VibeKit sendiri (untuk memakai layani dari mesin VibeKit lain):
+
+```json
+{
+  "mcpServers": [
+    {
+      "nama": "proyek-saya",
+      "url": "http://127.0.0.1:3939/",
+      "headers": { "Authorization": "Bearer <token-dari-server>" }
+    }
+  ]
+}
+```
+
+### Keamanan berlapis
+
+- **Token Bearer wajib** — request tanpa token yang benar ditolak `401` sebelum diproses.
+- **Pagar folder tetap berlaku** — path di luar folder yang dilayani ditolak, sama seperti mode agent lokal.
+- **Konfirmasi di terminal server** — setiap `tulis_file`, `edit_file`, dan `jalankan_perintah` dari client meminta persetujuan Anda di terminal tempat `vibekit layani` berjalan (jawab selain `y`/`ya` = ditolak). Flag `--auto` melewati langkah ini; aktifkan hanya untuk alur yang Anda percayai.
+- **Server hanya hidup selama perintah berjalan** — `Ctrl+C` memutus akses sepenuhnya. Tidak ada daemon yang tertinggal.
+
+### Opsi & konfigurasi
+
+| Opsi | Fungsi |
+|---|---|
+| `--port <n>` | Port TCP (bawaan: field `layani.port` di konfigurasi, atau `3939`) |
+| `--host <h>` | Alamat bind (bawaan: field `layani.host`, atau `127.0.0.1`). Bawaan ini hanya bisa dijangkau dari komputer yang sama. Untuk akses dari jaringan privat seperti **Tailscale**, jalankan dengan `--host <alamat-tailscale-komputer-anda>` — token tetap wajib, jadi jangan pernah mempublikasikan server ini ke internet terbuka. |
+| `--token <t>` | Token Bearer eksplisit (mengalahkan env `VIBEKIT_LAYANI_TOKEN` dan field `layani.token`) |
+| `--auto`, `--yes` | Lewati konfirmasi terminal untuk aksi tulis/perintah |
+
+Perintah ini **tidak membutuhkan konfigurasi providers** — ia tidak memanggil model sama sekali; yang dilayani murni akses tool ke folder Anda, di bawah kendali Anda.
 
 ## Laporan Pemakaian — `vibekit hemat`
 
@@ -269,6 +311,7 @@ Plafon token untuk **satu respons** model (dikirim sebagai `max_tokens`) — pla
 | `providers[].apiKey` | Kunci API langsung, atau `env:NAMA_VAR` untuk membaca dari variabel lingkungan. |
 | `providers[].extraBody` | **Opsional.** Objek bebas yang digabung apa adanya ke body permintaan (kenop khas model/penyedia). |
 | `mcpServers` | **Opsional.** Daftar server MCP (lihat bagian Dukungan MCP): tiap entri wajib punya `nama` plus `perintah` (stdio lokal, dengan `argumen`/`env` opsional) atau `url` (HTTP remote, dengan `headers` opsional). |
+| `layani` | **Opsional.** Konfigurasi perintah `vibekit layani` (lihat bagian VibeKit Layani): `token` (dibuat & disimpan otomatis bila kosong), `port` (bawaan `3939`), `host` (bawaan `127.0.0.1`). Flag perintah dan env `VIBEKIT_LAYANI_TOKEN` mengalahkan field ini. |
 
 ## Pemecahan Masalah
 
@@ -312,7 +355,7 @@ Keputusan repo: `dist/` masuk `.gitignore` dan dibangun saat publish (`prepublis
 
 ## Status Nama di npm
 
-Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`; v0.3.0 menggabungkan kemampuan agent itu ke `ask` dan `chat`; v0.4.0 menambahkan mode auto-allow dan kompaksi riwayat aksi; v0.5.0 menambahkan dukungan MCP; v0.6.0 menambahkan laporan `hemat`, streaming jawaban, mode `--rencana`, sesi chat yang bisa dilanjutkan, dan brief proyek) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
+Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`; v0.3.0 menggabungkan kemampuan agent itu ke `ask` dan `chat`; v0.4.0 menambahkan mode auto-allow dan kompaksi riwayat aksi; v0.5.0 menambahkan dukungan MCP; v0.6.0 menambahkan laporan `hemat`, streaming jawaban, mode `--rencana`, sesi chat yang bisa dilanjutkan, dan brief proyek; v0.7.0 menambahkan `vibekit layani` — mode server MCP agar agen AI eksternal bisa bekerja di folder proyek Anda dengan token + konfirmasi terminal) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
 
 ## Lisensi
 

@@ -25,11 +25,27 @@ export interface GayaConfig {
   maksTokenJawaban?: number;
 }
 
+/**
+ * Konfigurasi perintah `vibekit layani` — server MCP yang melayani folder
+ * kerja ke agen AI eksternal. Semua field opsional: token dibuat & disimpan
+ * otomatis saat pertama kali kosong, port/host punya nilai bawaan.
+ */
+export interface LayaniConfig {
+  /** Token Bearer yang wajib dikirim client; dibuat otomatis bila kosong. */
+  token?: string;
+  /** Port TCP server (bawaan 3939). */
+  port?: number;
+  /** Alamat bind (bawaan 127.0.0.1; isi alamat Tailscale untuk akses jarak jauh). */
+  host?: string;
+}
+
 export interface VibekitConfig {
   providers: ProviderConfig[];
   gaya: GayaConfig;
   /** Server MCP opsional: tool dari server-server ini menjadi tool agent tambahan. */
   mcpServers?: McpServerConfig[];
+  /** Konfigurasi server layani (perintah `vibekit layani`) — arah sebaliknya dari mcpServers. */
+  layani?: LayaniConfig;
 }
 
 /**

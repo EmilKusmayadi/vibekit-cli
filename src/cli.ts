@@ -5,8 +5,10 @@ import {
   configDir,
   globalConfigPath,
   muatConfig,
+  simpanTokenLayani,
   statePath,
 } from "./config.js";
+import { buatTokenLayani, mulaiServerLayani } from "./layani.js";
 import {
   jalankanAgent,
   jalankanAgentRencana,
@@ -39,7 +41,7 @@ import {
 import { formatAngka } from "./token.js";
 import type { ChatMessage, ProviderConfig, ToolDefinition, VibekitConfig } from "./types.js";
 
-const VERSI = "0.6.0";
+const VERSI = "0.7.0";
 const BATAS_TOKEN_RIWAYAT = 4000;
 
 function bantuan(): void {
@@ -51,6 +53,7 @@ Penggunaan:
   vibekit chat [opsi]                   Percakapan interaktif yang juga bisa bertindak (perintah /keluar untuk berhenti)
   vibekit do "<tugas>" [opsi]           Mode agent sekali jalan: kerjakan tugas dengan tool file/perintah di folder ini
   vibekit mcp                           Daftar tool dari server MCP pada konfigurasi (field mcpServers)
+  vibekit layani [opsi]                 Layani folder ini ke agen AI eksternal lewat server MCP (token + konfirmasi terminal)
   vibekit brief                         Susun ringkasan konteks proyek ke .vibekit/brief.md (dipakai otomatis sebagai konteks)
   vibekit hemat                         Laporan pemakaian token (hari ini & 7 hari) + token yang dihemat kompaksi riwayat
   vibekit sesi                          Daftar sesi chat tersimpan (bisa dilanjutkan dengan chat --lanjut)
@@ -105,6 +108,22 @@ Dukungan MCP (Model Context Protocol):
   berdampingan dengan tool bawaan, bernama mcp__<server>__<tool>. Tool MCP
   diperlakukan sebagai aksi: selalu meminta persetujuanmu, kecuali mode
   auto-allow. Perintah "vibekit mcp" menampilkan tool yang tersedia.
+
+VibeKit Layani (server MCP — arah sebaliknya):
+  "vibekit layani" menjalankan VibeKit sebagai SERVER MCP yang melayani
+  folder tempat perintah dijalankan kepada agen AI eksternal (mis. Muse
+  lewat konektor khusus, atau client MCP lain). Kelima tool mode agent
+  tersedia dari jarak jauh, dengan pagar yang sama: token Bearer wajib,
+  path tidak bisa keluar dari folder ini, dan aksi tulis/perintah meminta
+  persetujuanmu di terminal server ini (kecuali --auto). Server berhenti
+  total dengan Ctrl+C. Opsi:
+    --port <n>     Port TCP (bawaan: config layani.port, atau 3939)
+    --host <h>     Alamat bind (bawaan: config layani.host, atau 127.0.0.1;
+                   isi alamat Tailscale komputermu untuk akses jarak jauh)
+    --token <t>    Token Bearer (bawaan: env VIBEKIT_LAYANI_TOKEN, atau
+                   config layani.token — dibuat & disimpan otomatis bila
+                   belum ada)
+    --auto, --yes  Lewati persetujuan terminal untuk aksi tulis/perintah
 
 Cara kerja singkat:
   Penyedia dicoba sesuai urutan di konfigurasi. Bila kuota penyedia terdeteksi
@@ -737,6 +756,128 @@ function perintahBrief(): number {
   return 0;
 }
 
+interface UraiLayani {
+  port?: number;
+  host?: string;
+  token?: string;
+  auto: boolean;
+}
+
+function uraiArgLayani(args: string[]): UraiLayani | { error: string } {
+  const hasil: UraiLayani = { auto: false };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--auto" || a === "--yes") {
+      hasil.auto = true;
+    } else if (a === "--port") {
+      const v = Number(args[++i]);
+      if (!Number.isInteger(v) || v < 0 || v > 65535) return { error: "Nilai --port harus bilangan 0–65535." };
+      hasil.port = v;
+    } else if (a === "--host") {
+      const v = args[++i];
+      if (!v) return { error: "Opsi --host membutuhkan nilai." };
+      hasil.host = v;
+    } else if (a === "--token") {
+      const v = args[++i];
+      if (!v) return { error: "Opsi --token membutuhkan nilai." };
+      hasil.token = v;
+    } else {
+      return { error: `Opsi layani tidak dikenal: ${a}` };
+    }
+  }
+  return hasil;
+}
+
+/**
+ * Perintah `vibekit layani`: jalankan server MCP yang melayani folder kerja
+ * saat ini ke agen AI eksternal. Berbeda dari perintah lain, layani TIDAK
+ * mewajibkan konfigurasi providers — ia hanya butuh token, yang dibuat dan
+ * disimpan otomatis ke konfigurasi global bila belum ada. Server hidup
+ * sampai Ctrl+C (SIGINT/SIGTERM).
+ */
+async function perintahLayani(args: string[]): Promise<number> {
+  const urai = uraiArgLayani(args);
+  if ("error" in urai) {
+    console.error(`[vibekit] ${urai.error}`);
+    return 2;
+  }
+  // Konfigurasi dibaca longgar: kegagalan muat (belum init, dsb.) tidak
+  // menggagalkan layani — nilai bawaan dipakai, token tetap bisa dibuat.
+  let config: VibekitConfig | null = null;
+  try {
+    config = muatConfig().config;
+  } catch {
+    config = null;
+  }
+  const dariConfig = config?.layani ?? {};
+  const token =
+    urai.token ??
+    (process.env.VIBEKIT_LAYANI_TOKEN || undefined) ??
+    dariConfig.token ??
+    (() => {
+      const baru = buatTokenLayani();
+      try {
+        simpanTokenLayani(baru);
+        console.log("[vibekit] Token layani baru dibuat dan disimpan di ~/.vibekit/config.json (field layani.token).");
+      } catch (e) {
+        console.error(
+          `[vibekit] Token baru dibuat tetapi gagal disimpan (${(e as Error).message}); catat token di bawah ini baik-baik.`
+        );
+      }
+      return baru;
+    })();
+  const host = urai.host ?? dariConfig.host ?? "127.0.0.1";
+  const port = urai.port ?? dariConfig.port ?? 3939;
+  const cwd = process.cwd();
+
+  const pembaca = buatPembacaBaris();
+  const konfirmasi = buatKonfirmasi(pembaca);
+  let server: Awaited<ReturnType<typeof mulaiServerLayani>>;
+  try {
+    server = await mulaiServerLayani({
+      cwd,
+      host,
+      port,
+      token,
+      versi: VERSI,
+      konfirmasi,
+      autoAllow: urai.auto,
+    });
+  } catch (e) {
+    pembaca.tutup();
+    console.error(`[vibekit] Gagal memulai server layani: ${(e as Error).message}`);
+    return 1;
+  }
+
+  console.log(`\n[vibekit] Server layani AKTIF — melayani folder: ${cwd}`);
+  console.log(`[vibekit] Alamat : http://${server.host}:${server.port}/`);
+  console.log(`[vibekit] Token  : ${token}`);
+  console.log(
+    "[vibekit] Daftarkan alamat + token ini sebagai server MCP (transport Streamable HTTP, header Authorization: Bearer <token>) pada agen/client-mu."
+  );
+  if (host === "127.0.0.1") {
+    console.log(
+      "[vibekit] Catatan: bind 127.0.0.1 hanya bisa dijangkau dari komputer ini. Untuk akses jarak jauh (mis. lewat Tailscale), jalankan ulang dengan --host <alamat-tailscale-komputermu>."
+    );
+  }
+  console.log(
+    urai.auto
+      ? "[vibekit] Mode AUTO aktif: aksi tulis/perintah dari client langsung dijalankan TANPA persetujuan. Pagar folder tetap berlaku."
+      : "[vibekit] Aksi tulis_file / edit_file / jalankan_perintah dari client akan meminta persetujuanmu di terminal ini."
+  );
+  console.log("[vibekit] Tekan Ctrl+C untuk berhenti dan memutus akses sepenuhnya.\n");
+
+  await new Promise<void>((resolve) => {
+    const berhenti = () => resolve();
+    process.once("SIGINT", berhenti);
+    process.once("SIGTERM", berhenti);
+  });
+  await server.tutup();
+  pembaca.tutup();
+  console.log("\n[vibekit] Server layani berhenti. Akses terputus.");
+  return 0;
+}
+
 function perintahStatus(): number {
   let config: VibekitConfig;
   try {
@@ -778,6 +919,8 @@ async function utama(): Promise<number> {
       return perintahDo(sisa);
     case "mcp":
       return perintahMcp();
+    case "layani":
+      return perintahLayani(sisa);
     case "brief":
       return perintahBrief();
     case "hemat":

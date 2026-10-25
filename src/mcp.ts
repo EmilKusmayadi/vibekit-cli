@@ -18,7 +18,7 @@ export type { McpServerConfig } from "./types.js";
 /** Versi protokol MCP yang ditawarkan saat initialize. */
 const VERSI_PROTOKOL = "2025-03-26";
 /** Samakan dengan "version" di package.json (nama/versi clientInfo handshake). */
-const VERSI_KLIEN = "0.6.0";
+const VERSI_KLIEN = "0.7.0";
 /** Batas waktu satu request JSON-RPC (kedua transport). */
 const TIMEOUT_REQUEST_MS = 60_000;
 

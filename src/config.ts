@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { McpServerConfig, ProviderConfig, VibekitConfig } from "./types.js";
+import type { LayaniConfig, McpServerConfig, ProviderConfig, VibekitConfig } from "./types.js";
 
 export function configDir(): string {
   return path.join(os.homedir(), ".vibekit");
@@ -142,9 +142,27 @@ export function muatConfig(cwd: string = process.cwd()): { config: VibekitConfig
     throw new Error(`Konfigurasi di ${sumber} harus berisi array "providers" yang tidak kosong.`);
   }
   const mcpServers = normalisasiMcpServers((obj as { mcpServers?: unknown }).mcpServers);
+  const layaniMentah = (obj as { layani?: unknown }).layani;
+  const layani: LayaniConfig | undefined =
+    layaniMentah && typeof layaniMentah === "object"
+      ? {
+          ...(typeof (layaniMentah as LayaniConfig).token === "string" &&
+          (layaniMentah as LayaniConfig).token !== ""
+            ? { token: (layaniMentah as LayaniConfig).token }
+            : {}),
+          ...(typeof (layaniMentah as LayaniConfig).port === "number"
+            ? { port: (layaniMentah as LayaniConfig).port }
+            : {}),
+          ...(typeof (layaniMentah as LayaniConfig).host === "string" &&
+          (layaniMentah as LayaniConfig).host !== ""
+            ? { host: (layaniMentah as LayaniConfig).host }
+            : {}),
+        }
+      : undefined;
   const config: VibekitConfig = {
     providers: obj.providers.map((p) => normalisasiProvider(p as ProviderConfig)),
     ...(mcpServers ? { mcpServers } : {}),
+    ...(layani && Object.keys(layani).length > 0 ? { layani } : {}),
     gaya: {
       jawaban: obj.gaya?.jawaban ?? "poin-penting",
       // Angka dipertahankan apa adanya (termasuk 0 = tanpa batas); tidak diisi/null
@@ -153,6 +171,21 @@ export function muatConfig(cwd: string = process.cwd()): { config: VibekitConfig
     },
   };
   return { config, sumber };
+}
+
+/**
+ * Simpan token layani ke konfigurasi GLOBAL (~/.vibekit/config.json),
+ * membuat file dari template dulu bila belum ada. Field lain tidak diubah —
+ * file dibaca sebagai JSON mentah, hanya field "layani.token" yang disentuh.
+ */
+export function simpanTokenLayani(token: string): void {
+  const target = globalConfigPath();
+  if (!fs.existsSync(target)) buatConfigGlobal();
+  const mentah = JSON.parse(fs.readFileSync(target, "utf8")) as Record<string, unknown>;
+  const layani = (mentah.layani ?? {}) as Record<string, unknown>;
+  layani.token = token;
+  mentah.layani = layani;
+  fs.writeFileSync(target, JSON.stringify(mentah, null, 2) + "\n", "utf8");
 }
 
 /** Selesaikan nilai apiKey: sintaks "env:NAMA_VAR" dibaca dari variabel lingkungan. */
