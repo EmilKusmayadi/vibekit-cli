@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ProviderConfig, VibekitConfig } from "./types.js";
+import type { McpServerConfig, ProviderConfig, VibekitConfig } from "./types.js";
 
 export function configDir(): string {
   return path.join(os.homedir(), ".vibekit");
@@ -77,6 +77,46 @@ function normalisasiProvider(p: Partial<ProviderConfig> & { nama: string }): Pro
   };
 }
 
+/** Saring rekaman bebas menjadi Record<string,string> (hanya nilai string yang dipertahankan). */
+function rekamanString(mentah: unknown): Record<string, string> {
+  const hasil: Record<string, string> = {};
+  if (mentah && typeof mentah === "object") {
+    for (const [k, v] of Object.entries(mentah as Record<string, unknown>)) {
+      if (typeof v === "string") hasil[k] = v;
+    }
+  }
+  return hasil;
+}
+
+/**
+ * Normalisasi daftar mcpServers dari konfigurasi mentah (validasi ringan):
+ * entri wajib punya "nama" dan salah satu dari "perintah" (stdio) / "url"
+ * (HTTP); entri yang tidak memenuhi syarat dilewati, bukan menggagalkan muat.
+ */
+function normalisasiMcpServers(mentah: unknown): McpServerConfig[] | undefined {
+  if (!Array.isArray(mentah)) return undefined;
+  const hasil: McpServerConfig[] = [];
+  for (const entri of mentah) {
+    if (!entri || typeof entri !== "object") continue;
+    const o = entri as Record<string, unknown>;
+    const nama = typeof o.nama === "string" ? o.nama.trim() : "";
+    const perintah = typeof o.perintah === "string" && o.perintah.trim() !== "" ? o.perintah : undefined;
+    const url = typeof o.url === "string" && o.url.trim() !== "" ? o.url : undefined;
+    if (!nama || (!perintah && !url)) continue;
+    hasil.push({
+      nama,
+      ...(perintah ? { perintah } : {}),
+      ...(Array.isArray(o.argumen)
+        ? { argumen: o.argumen.filter((a): a is string => typeof a === "string") }
+        : {}),
+      ...(o.env && typeof o.env === "object" ? { env: rekamanString(o.env) } : {}),
+      ...(url ? { url } : {}),
+      ...(o.headers && typeof o.headers === "object" ? { headers: rekamanString(o.headers) } : {}),
+    });
+  }
+  return hasil.length > 0 ? hasil : undefined;
+}
+
 /**
  * Muat konfigurasi: file proyek ./vibekit.config.json menimpa global ~/.vibekit/config.json.
  * Lempar Error dengan pesan Bahasa Indonesia bila tidak ada konfigurasi / tidak valid.
@@ -101,8 +141,10 @@ export function muatConfig(cwd: string = process.cwd()): { config: VibekitConfig
   if (!obj || !Array.isArray(obj.providers) || obj.providers.length === 0) {
     throw new Error(`Konfigurasi di ${sumber} harus berisi array "providers" yang tidak kosong.`);
   }
+  const mcpServers = normalisasiMcpServers((obj as { mcpServers?: unknown }).mcpServers);
   const config: VibekitConfig = {
     providers: obj.providers.map((p) => normalisasiProvider(p as ProviderConfig)),
+    ...(mcpServers ? { mcpServers } : {}),
     gaya: {
       jawaban: obj.gaya?.jawaban ?? "poin-penting",
       // Angka dipertahankan apa adanya (termasuk 0 = tanpa batas); tidak diisi/null

@@ -16,6 +16,7 @@ import {
 } from "./agent.js";
 import { teksBanner } from "./banner.js";
 import { bangunKonteks } from "./context.js";
+import { sambungkanMcpServers } from "./mcp.js";
 import {
   formatJam,
   muatState,
@@ -23,9 +24,9 @@ import {
   statePenyedia,
 } from "./state.js";
 import { formatAngka } from "./token.js";
-import type { ChatMessage, VibekitConfig } from "./types.js";
+import type { ChatMessage, ToolDefinition, VibekitConfig } from "./types.js";
 
-const VERSI = "0.4.1";
+const VERSI = "0.5.0";
 const BATAS_TOKEN_RIWAYAT = 4000;
 
 function bantuan(): void {
@@ -36,6 +37,7 @@ Penggunaan:
   vibekit ask "<pertanyaan>" [opsi]     Tanya sekali (bisa bertindak: membuat file & menjalankan perintah dengan persetujuanmu)
   vibekit chat                          Percakapan interaktif yang juga bisa bertindak (perintah /keluar untuk berhenti)
   vibekit do "<tugas>"                  Mode agent sekali jalan: kerjakan tugas dengan tool file/perintah di folder ini
+  vibekit mcp                           Daftar tool dari server MCP pada konfigurasi (field mcpServers)
   vibekit status                        Status & pemakaian token tiap penyedia hari ini
   vibekit --help                        Tampilkan bantuan ini
   vibekit --version                     Tampilkan versi
@@ -65,6 +67,13 @@ Kemampuan agent (ask, chat, do):
   do = mode tugas sekali jalan dengan jejak langkah & ringkasan akhir.
   Contoh: vibekit do "buatkan file halo.txt berisi sapaan, lalu tampilkan daftar file di sini"
 
+Dukungan MCP (Model Context Protocol):
+  Bila konfigurasi memuat field "mcpServers", VibeKit menyambung ke server
+  MCP lokal (stdio) maupun remote (HTTP) itu dan tool mereka tampil
+  berdampingan dengan tool bawaan, bernama mcp__<server>__<tool>. Tool MCP
+  diperlakukan sebagai aksi: selalu meminta persetujuanmu, kecuali mode
+  auto-allow. Perintah "vibekit mcp" menampilkan tool yang tersedia.
+
 Cara kerja singkat:
   Penyedia dicoba sesuai urutan di konfigurasi. Bila kuota penyedia terdeteksi
   habis, permintaan otomatis diulang ke penyedia berikutnya. Setiap jawaban
@@ -92,6 +101,39 @@ function cetakPeringatanAuto(): void {
   console.error(
     "[vibekit] Mode auto-allow AKTIF: aksi tulis file & menjalankan perintah akan dijalankan TANPA persetujuanmu. Agent tetap terkunci di folder kerja ini."
   );
+}
+
+function potongTeks(teks: string, maks: number): string {
+  return teks.length > maks ? teks.slice(0, maks) + "…" : teks;
+}
+
+interface KoneksiMcpCli {
+  toolEkstra: ToolDefinition[];
+  eksekutorEkstra: (nama: string, argumen: Record<string, unknown>) => Promise<string>;
+  tutup: () => Promise<void>;
+}
+
+/**
+ * Sambungkan server MCP dari konfigurasi (bila ada) dan siapkan tool ekstra
+ * untuk loop agent. Satu baris ringkas dicetak per server (`MCP <nama>: N
+ * tool`); kegagalan per server tampil sebagai peringatan dan tidak
+ * menggagalkan perintah. Kembalikan null bila konfigurasi tanpa mcpServers.
+ * Pemanggil WAJIB memanggil `tutup()` saat selesai (try/finally).
+ */
+async function siapkanMcp(config: VibekitConfig): Promise<KoneksiMcpCli | null> {
+  if (!config.mcpServers || config.mcpServers.length === 0) return null;
+  const pengelola = await sambungkanMcpServers(config.mcpServers);
+  for (const r of pengelola.rincianServer) {
+    console.error(`[vibekit] MCP ${r.nama}: ${r.tools.length} tool`);
+  }
+  for (const p of pengelola.peringatan) {
+    console.error(`[vibekit] MCP peringatan: ${p}`);
+  }
+  return {
+    toolEkstra: pengelola.tools,
+    eksekutorEkstra: (nama, argumen) => pengelola.panggilTool(nama, argumen),
+    tutup: () => pengelola.tutupSemua(),
+  };
 }
 
 interface OpsiAsk {
@@ -220,6 +262,7 @@ async function perintahAsk(args: string[]): Promise<number> {
     { role: "user", content: isiUser },
   ];
   if (urai.auto) cetakPeringatanAuto();
+  const mcp = await siapkanMcp(config);
   const pembaca = buatPembacaBaris();
   try {
     const hasil = await jalankanGiliran({
@@ -230,6 +273,7 @@ async function perintahAsk(args: string[]): Promise<number> {
       konfirmasi: buatKonfirmasi(pembaca),
       autoAllow: urai.auto,
       jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+      ...(mcp ? { toolEkstra: mcp.toolEkstra, eksekutorEkstra: mcp.eksekutorEkstra } : {}),
     });
     if (!hasil.ok) {
       if (hasil.batasTercapai) {
@@ -254,6 +298,7 @@ async function perintahAsk(args: string[]): Promise<number> {
     return 0;
   } finally {
     pembaca.tutup();
+    if (mcp) await mcp.tutup();
   }
 }
 
@@ -272,6 +317,8 @@ async function perintahChat(args: string[]): Promise<number> {
   console.log("Chat ini juga bisa bertindak: minta saja dibuatkan file atau menjalankan perintah — setiap aksi meminta persetujuanmu dulu.");
   console.log("Perintah /auto menyalakan/mematikan mode auto-allow (aksi tanpa persetujuan) di tengah sesi.");
   if (autoAktif) cetakPeringatanAuto();
+  // Server MCP disambungkan SEKALI untuk seluruh sesi chat ini.
+  const mcp = await siapkanMcp(config);
   const riwayat: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT_GABUNGAN }];
   const pembaca = buatPembacaBaris();
   const konfirmasi = buatKonfirmasi(pembaca);
@@ -313,6 +360,7 @@ async function perintahChat(args: string[]): Promise<number> {
         konfirmasi,
         autoAllow: autoAktif,
         jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+        ...(mcp ? { toolEkstra: mcp.toolEkstra, eksekutorEkstra: mcp.eksekutorEkstra } : {}),
       });
       if (hasil.ok) {
         console.log(`\nvibekit (${hasil.providerTerakhir?.nama ?? "?"})> ${hasil.jawabanAkhir}\n`);
@@ -335,6 +383,7 @@ async function perintahChat(args: string[]): Promise<number> {
     }
   } finally {
     pembaca.tutup();
+    if (mcp) await mcp.tutup();
   }
   return 0;
 }
@@ -365,6 +414,7 @@ async function perintahDo(args: string[]): Promise<number> {
     console.log("Tool baca berjalan langsung; tulis/edit file dan jalankan perintah meminta persetujuanmu satu per satu.\n");
   }
 
+  const mcp = await siapkanMcp(config);
   const pembaca = buatPembacaBaris();
   const konfirmasi = buatKonfirmasi(pembaca);
 
@@ -377,6 +427,7 @@ async function perintahDo(args: string[]): Promise<number> {
       konfirmasi,
       autoAllow: auto,
       jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+      ...(mcp ? { toolEkstra: mcp.toolEkstra, eksekutorEkstra: mcp.eksekutorEkstra } : {}),
     });
     for (const c of hasil.catatan) {
       console.error(`[vibekit] dilewati ${c.nama}: ${c.alasan}`);
@@ -386,6 +437,64 @@ async function perintahDo(args: string[]): Promise<number> {
     return hasil.ok ? 0 : 1;
   } finally {
     pembaca.tutup();
+    if (mcp) await mcp.tutup();
+  }
+}
+
+/**
+ * `vibekit mcp`: sambungkan semua server MCP dari konfigurasi, cetak daftar
+ * tool per server (nama ter-namespace + deskripsi singkat), lalu putuskan.
+ */
+async function perintahMcp(): Promise<number> {
+  let config: VibekitConfig;
+  try {
+    config = muatConfig().config;
+  } catch (e) {
+    console.error(`[vibekit] ${(e as Error).message}`);
+    return 2;
+  }
+  const daftar = config.mcpServers ?? [];
+  if (daftar.length === 0) {
+    console.log("Belum ada server MCP di konfigurasi.");
+    console.log(
+      "Tambahkan field \"mcpServers\" pada file konfigurasi — tiap entri adalah server lokal (stdio, lewat \"perintah\") atau remote (HTTP, lewat \"url\"). Contoh minimal:"
+    );
+    console.log(
+      JSON.stringify(
+        {
+          mcpServers: [
+            {
+              nama: "filesystem",
+              perintah: "npx",
+              argumen: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+            },
+          ],
+        },
+        null,
+        2
+      )
+    );
+    console.log("Lihat bagian \"Dukungan MCP\" di README untuk contoh lengkap, termasuk server remote.");
+    return 0;
+  }
+  const pengelola = await sambungkanMcpServers(daftar);
+  try {
+    for (const r of pengelola.rincianServer) {
+      console.log(`\nMCP ${r.nama} — ${r.tools.length} tool:`);
+      for (const t of r.tools) {
+        console.log(`  ${t.namaLengkap}${t.deskripsi ? ` — ${potongTeks(t.deskripsi, 80)}` : ""}`);
+      }
+    }
+    for (const p of pengelola.peringatan) {
+      console.error(`[vibekit] MCP peringatan: ${p}`);
+    }
+    if (pengelola.rincianServer.length === 0) {
+      console.error("[vibekit] Tidak ada server MCP yang berhasil tersambung.");
+      return 1;
+    }
+    return 0;
+  } finally {
+    await pengelola.tutupSemua();
   }
 }
 
@@ -428,6 +537,8 @@ async function utama(): Promise<number> {
       return perintahChat(sisa);
     case "do":
       return perintahDo(sisa);
+    case "mcp":
+      return perintahMcp();
     case "status":
       return perintahStatus();
     case "--version":

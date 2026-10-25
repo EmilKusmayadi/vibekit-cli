@@ -28,6 +28,29 @@ export interface GayaConfig {
 export interface VibekitConfig {
   providers: ProviderConfig[];
   gaya: GayaConfig;
+  /** Server MCP opsional: tool dari server-server ini menjadi tool agent tambahan. */
+  mcpServers?: McpServerConfig[];
+}
+
+/**
+ * Satu server MCP (Model Context Protocol). VibeKit berperan sebagai client:
+ * tool yang disediakan server tampil sebagai tool agent tambahan dengan nama
+ * ter-namespace `mcp__<nama>__<tool>`. Isi SALAH SATU transport:
+ * `perintah` (stdio, server lokal) atau `url` (HTTP remote).
+ */
+export interface McpServerConfig {
+  /** Nama unik server, menjadi bagian namespace tool: mcp__<nama>__<tool>. */
+  nama: string;
+  /** Transport stdio: perintah menjalankan server lokal, mis. "npx" atau "node". */
+  perintah?: string;
+  /** Argumen untuk perintah stdio. */
+  argumen?: string[];
+  /** Variabel lingkungan tambahan untuk proses server stdio (digabung di atas process.env). */
+  env?: Record<string, string>;
+  /** Transport HTTP (Streamable HTTP): URL endpoint MCP remote. */
+  url?: string;
+  /** Header HTTP tambahan untuk transport HTTP, mis. { "X-Goog-Api-Key": "..." }. */
+  headers?: Record<string, string>;
 }
 
 /** Satu panggilan tool yang diminta model (format function calling OpenAI). */

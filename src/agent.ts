@@ -106,6 +106,7 @@ export const DEFINISI_TOOL: ToolDefinition[] = [
 const SYSTEM_PROMPT_AGENT = [
   "Kamu adalah agent pelaksana tugas VibeKit yang bekerja di dalam SATU folder kerja pengguna.",
   "Kerjakan tugas langkah demi langkah memakai tool yang tersedia: daftar_file, baca_file, tulis_file, edit_file, jalankan_perintah.",
+  "Tool tambahan dari server MCP (nama diawali \"mcp__\") mungkin juga tersedia — gunakan bila relevan; tool MCP juga selalu meminta persetujuan pengguna dan penolakan diperlakukan sama seperti tool bawaan.",
   "Semua path bersifat relatif terhadap folder kerja; jangan pernah mencoba mengakses apa pun di luar folder itu.",
   "Aksi tulis_file, edit_file, dan jalankan_perintah selalu meminta persetujuan pengguna dulu; bila pengguna menolak, jangan memaksa dan jangan mengulang aksi yang sama — sesuaikan rencana atau akhiri tugas.",
   "Jangan mengarang isi file: gunakan daftar_file/baca_file dulu bila perlu mengetahui isi folder/file.",
@@ -121,6 +122,7 @@ export const SYSTEM_PROMPT_GABUNGAN = [
   "Kamu adalah lawan bicara VibeKit yang bekerja di dalam SATU folder kerja pengguna.",
   "Jawab pertanyaan biasa langsung sebagai teks, singkat dan hanya poin-poin penting.",
   "Bila pengguna meminta dibuatkan/diubah file atau menjalankan perintah, gunakan tool yang tersedia: daftar_file, baca_file, tulis_file, edit_file, jalankan_perintah.",
+  "Tool tambahan dari server MCP (nama diawali \"mcp__\") mungkin juga tersedia — gunakan bila relevan; tool MCP juga selalu meminta persetujuan pengguna dan penolakan diperlakukan sama seperti tool bawaan.",
   "Semua path bersifat relatif terhadap folder kerja; jangan pernah mencoba mengakses apa pun di luar folder itu.",
   "Aksi tulis_file, edit_file, dan jalankan_perintah selalu meminta persetujuan pengguna dulu; bila pengguna menolak, jangan memaksa dan jangan mengulang aksi yang sama.",
   "Jangan mengarang isi file: gunakan daftar_file/baca_file dulu bila perlu mengetahui isi folder/file.",
@@ -299,6 +301,47 @@ export async function eksekusiTool(panggilan: ToolCall, konteks: KonteksEksekusi
   }
 }
 
+/** Eksekutor tool non-bawaan (mis. tool MCP): menerima nama lengkap + argumen, mengembalikan teks hasil. */
+export type EksekutorEkstra = (nama: string, argumen: Record<string, unknown>) => Promise<string>;
+
+interface KonteksEksekusiEkstra {
+  konfirmasi: Konfirmasi;
+  autoAllow?: boolean;
+  eksekutorEkstra?: EksekutorEkstra;
+}
+
+/**
+ * Jalankan satu panggilan tool EKSTERNAL (non-bawaan, mis. dari server MCP).
+ * Tool eksternal selalu diperlakukan sebagai AKSI: wajib konfirmasi pengguna
+ * (pratinjau nama tool + argumen ringkas ±300 karakter), kecuali mode
+ * auto-allow — sama persis seperti tulis_file. Selalu mengembalikan teks
+ * hasil dengan awalan "OK:" / "ERROR:" / "DITOLAK:" seperti eksekusiTool.
+ */
+export async function eksekusiToolEkstra(panggilan: ToolCall, konteks: KonteksEksekusiEkstra): Promise<string> {
+  const nama = panggilan.function.name;
+  let arg: Record<string, unknown>;
+  try {
+    arg = JSON.parse(panggilan.function.arguments || "{}") as Record<string, unknown>;
+  } catch {
+    return `ERROR: argumen untuk tool ${nama} bukan JSON yang valid.`;
+  }
+  if (!konteks.eksekutorEkstra) {
+    return `ERROR: tool ${nama} tidak tersedia (eksekutor eksternal tidak terpasang pada giliran ini).`;
+  }
+  const konfirmasiEfektif: Konfirmasi = konteks.autoAllow ? async () => true : konteks.konfirmasi;
+  const deskripsi = `${nama} (tool eksternal/MCP)\nArgumen: ${potong(JSON.stringify(arg), 300)}`;
+  if (!(await konfirmasiEfektif(deskripsi))) {
+    return `DITOLAK: pengguna menolak aksi ${nama}. Tool tidak dipanggil. Jangan mengulang aksi yang sama; sesuaikan rencana atau akhiri dengan ringkasan.`;
+  }
+  try {
+    const hasil = (await konteks.eksekutorEkstra(nama, arg)).trim();
+    if (hasil.startsWith("ERROR:") || hasil.startsWith("DITOLAK:")) return hasil;
+    return `OK: ${hasil || "(tool selesai tanpa keluaran teks)"}`;
+  } catch (e) {
+    return `ERROR: ${(e as Error).message}`;
+  }
+}
+
 export interface OpsiGiliran {
   config: VibekitConfig;
   /**
@@ -323,6 +366,10 @@ export interface OpsiGiliran {
   maksLangkah?: number;
   /** Callback jejak langkah (untuk dicetak CLI secara langsung). */
   jejak?: (pesan: string) => void;
+  /** Definisi tool tambahan (mis. dari server MCP) yang digabung ke tool bawaan saat ditawarkan ke model. */
+  toolEkstra?: ToolDefinition[];
+  /** Eksekutor untuk tool-tool tambahan di atas; wajib ada bila toolEkstra diisi. */
+  eksekutorEkstra?: EksekutorEkstra;
 }
 
 export interface HasilGiliran {
@@ -357,6 +404,11 @@ export interface HasilGiliran {
 export async function jalankanGiliran(opsi: OpsiGiliran): Promise<HasilGiliran> {
   const maksLangkah = opsi.maksLangkah ?? MAKS_LANGKAH_BAWAAN;
   const messages = opsi.messages;
+  // Tool bawaan + tool ekstra (MCP) ditawarkan bersama; nama ekstra menentukan
+  // perutean eksekusi (eksekusiToolEkstra) dan perlakuan sebagai aksi.
+  const toolEkstra = opsi.toolEkstra ?? [];
+  const namaToolEkstra = new Set(toolEkstra.map((t) => t.function.name));
+  const semuaTool: ToolDefinition[] = [...DEFINISI_TOOL, ...toolEkstra];
   const catatan: CatatanPenyedia[] = [];
   let totalToken = 0;
   let semuaUsage = true;
@@ -371,7 +423,7 @@ export async function jalankanGiliran(opsi: OpsiGiliran): Promise<HasilGiliran> 
       messages,
       lokasiState: opsi.lokasiState,
       fetchImpl: opsi.fetchImpl,
-      tools: DEFINISI_TOOL,
+      tools: semuaTool,
     });
     catatan.push(...hasil.catatan);
 
@@ -428,13 +480,21 @@ export async function jalankanGiliran(opsi: OpsiGiliran): Promise<HasilGiliran> 
       } catch {
         argRingkas = "";
       }
-      const penandaAuto = opsi.autoAllow && TOOL_MUTASI.has(p.function.name) ? " (auto)" : "";
+      const adalahEkstra = namaToolEkstra.has(p.function.name);
+      const penandaAuto =
+        opsi.autoAllow && (TOOL_MUTASI.has(p.function.name) || adalahEkstra) ? " (auto)" : "";
       opsi.jejak?.(`langkah ${langkah}: ${p.function.name}${argRingkas ? ` (${argRingkas})` : ""}${penandaAuto}`);
-      const hasilTool = await eksekusiTool(p, {
-        cwd: opsi.cwd,
-        konfirmasi: opsi.konfirmasi,
-        autoAllow: opsi.autoAllow,
-      });
+      const hasilTool = adalahEkstra
+        ? await eksekusiToolEkstra(p, {
+            konfirmasi: opsi.konfirmasi,
+            autoAllow: opsi.autoAllow,
+            eksekutorEkstra: opsi.eksekutorEkstra,
+          })
+        : await eksekusiTool(p, {
+            cwd: opsi.cwd,
+            konfirmasi: opsi.konfirmasi,
+            autoAllow: opsi.autoAllow,
+          });
       opsi.jejak?.(`  → ${potong(hasilTool.split("\n")[0], 120)}`);
       messages.push({
         role: "tool",
@@ -502,13 +562,20 @@ export function pangkasRiwayatAman(messages: ChatMessage[], maksToken: number): 
 
 /** Target ringkas satu panggilan tool untuk pesan ringkasan kompaksi. */
 function targetRingkasTool(panggilan: ToolCall): string {
+  const nama = panggilan.function.name;
+  // Tool MCP (mcp__<server>__<tool>): targetnya adalah server/tool itu sendiri —
+  // argumennya tidak diasumsikan punya path/perintah.
+  if (nama.startsWith("mcp__")) {
+    const bagian = nama.split("__");
+    return bagian.length >= 3 ? `${bagian[1]}/${bagian.slice(2).join("__")}` : nama;
+  }
   let arg: Record<string, unknown> = {};
   try {
     arg = JSON.parse(panggilan.function.arguments || "{}") as Record<string, unknown>;
   } catch {
     // Argumen rusak: target dikosongkan, ringkasan tetap dibuat dari nama tool.
   }
-  if (panggilan.function.name === "jalankan_perintah") {
+  if (nama === "jalankan_perintah") {
     return potong(String(arg.perintah ?? ""), 40);
   }
   return String(arg.path ?? ".");
@@ -615,6 +682,10 @@ export interface OpsiAgent {
   maksLangkah?: number;
   /** Callback jejak langkah (untuk dicetak CLI secara langsung). */
   jejak?: (pesan: string) => void;
+  /** Definisi tool tambahan (mis. dari server MCP); diteruskan ke jalankanGiliran. */
+  toolEkstra?: ToolDefinition[];
+  /** Eksekutor untuk tool-tool tambahan di atas; diteruskan ke jalankanGiliran. */
+  eksekutorEkstra?: EksekutorEkstra;
 }
 
 export interface HasilAgent {
@@ -645,6 +716,8 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
     fetchImpl: opsi.fetchImpl,
     maksLangkah: opsi.maksLangkah,
     jejak: opsi.jejak,
+    toolEkstra: opsi.toolEkstra,
+    eksekutorEkstra: opsi.eksekutorEkstra,
   });
   if (hasil.pesanGagal !== undefined) {
     return { ok: false, ringkasan: hasil.pesanGagal, jumlahLangkah: hasil.jumlahLangkah, catatan: hasil.catatan };

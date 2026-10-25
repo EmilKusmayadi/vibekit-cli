@@ -77,6 +77,7 @@ vibekit status
 | `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]... [--auto]` | Satu pertanyaan yang boleh berakhir dengan aksi; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
 | `vibekit chat [--auto]` | Percakapan interaktif yang juga bisa bertindak di tengah obrolan; riwayat aksi lama dipadatkan jadi ringkasan lalu dipangkas sadar-tool (maks ±4.000 token, hanya pada batas giliran utuh); `/keluar` untuk berhenti, `/auto` untuk menyala-matikan mode auto-allow |
 | `vibekit do "<tugas>"` | Mode agent sekali jalan: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah) |
+| `vibekit mcp` | Sambungkan semua server MCP dari konfigurasi dan daftar tool yang mereka sediakan (lihat bagian Dukungan MCP di bawah) |
 | `vibekit status` | Tabel per penyedia: model, status (aktif / cooldown s.d. jam / anggaran tercapai), token terpakai hari ini |
 | `vibekit --help` / `--version` | Bantuan / versi |
 
@@ -110,6 +111,59 @@ Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yan
 - **Batas 12 langkah** per giliran/tugas, dan hasil tiap tool dipangkas (±4.000 karakter) sebelum dikirim balik ke model demi hemat token.
 - **Riwayat chat yang aman untuk tool.** Pemangkasan riwayat chat hanya terjadi pada batas giliran utuh (satu pesan pengguna + seluruh rangkaian tool-nya), sehingga tidak pernah ada pesan hasil tool yang yatim atau panggilan tool yang kehilangan hasilnya.
 
+## Dukungan MCP (Model Context Protocol)
+
+Sejak v0.5.0, agent VibeKit bisa memakai **tool dari server MCP mana pun**. VibeKit berperan sebagai MCP *client*: daftarkan server lewat field `mcpServers` di konfigurasi, dan tool mereka tampil **berdampingan dengan 5 tool bawaan** pada `ask`, `chat`, dan `do`. Nama tool ter-namespace menjadi `mcp__<namaServer>__<namaTool>` agar tidak bertabrakan antar server maupun dengan tool bawaan.
+
+Ada dua transport:
+
+- **stdio** — server lokal dijalankan sebagai proses anak lewat `perintah` + `argumen` (pesan JSON-RPC per baris/NDJSON). Cocok untuk server MCP komunitas yang umumnya didistribusikan sebagai perintah `npx`/`node`/`python`.
+- **HTTP (Streamable HTTP)** — server remote dipanggil lewat POST JSON-RPC ke `url`; header tambahan (mis. API key) diatur lewat `headers`. Jawaban JSON biasa maupun aliran SSE sama-sama didukung, dan `Mcp-Session-Id` dari server diteruskan antar-request.
+
+### Contoh: server lokal (stdio)
+
+```json
+{
+  "mcpServers": [
+    {
+      "nama": "filesystem",
+      "perintah": "npx",
+      "argumen": ["-y", "@modelcontextprotocol/server-filesystem", "D:/proyek-saya"]
+    }
+  ]
+}
+```
+
+### Contoh: server remote (HTTP) — Google Stitch
+
+Stitch (alat desain UI Google) menyediakan server MCP remote. Contoh konfigurasinya:
+
+```json
+{
+  "mcpServers": [
+    {
+      "nama": "stitch",
+      "url": "https://stitch.googleapis.com/mcp",
+      "headers": { "X-Goog-Api-Key": "ISI_API_KEY_STITCH_MU" }
+    }
+  ]
+}
+```
+
+> **Catatan tegas:** contoh di atas hanya pola konfigurasinya. Anda memerlukan **akses dan API key Stitch milik Anda sendiri** — nilai `ISI_API_KEY_STITCH_MU` adalah placeholder yang harus diganti key Anda (atau simpan key di tempat aman dan jangan commit file konfigurasi yang sudah terisi). Hal yang sama berlaku untuk server remote lain: header autentikasi selalu kredensial Anda sendiri.
+
+### Melihat tool yang tersedia
+
+```bash
+vibekit mcp
+```
+
+Perintah ini menyambungkan semua server di `mcpServers`, mencetak daftar tool per server beserta deskripsi singkatnya, lalu memutuskan sambungan. Saat `ask`/`chat`/`do` berjalan, satu baris `MCP <nama>: N tool` dicetak per server yang berhasil tersambung; server yang gagal cukup dicatat sebagai peringatan — server lain tetap jalan.
+
+### Keamanan tool MCP
+
+Tool MCP adalah **aksi pihak ketiga** yang dijalankan atas nama Anda, jadi perlakuannya sama dengan tool mutasi bawaan: **selalu meminta konfirmasi Anda satu per satu** (pratinjau menampilkan nama tool + argumennya), dan penolakan dilaporkan ke model. Mode auto-allow (`--auto`/`--yes`/`/auto`) melewati konfirmasi itu juga untuk tool MCP — aktifkan hanya bila Anda mempercayai server MCP yang terdaftar dan tugasnya. Sambungkan hanya server MCP yang Anda kenal sumbernya.
+
 ## Cara Failover Bekerja
 
 1. Sebelum memanggil, router memeriksa state lokal (`~/.vibekit/state.json`): penyedia yang masih **cooldown** atau sudah mencapai **anggaran harian** dilewati tanpa dipanggil.
@@ -125,6 +179,43 @@ Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yan
 - **Konteks terseleksi** — `--file/--dir` melewati file biner & file > 256 KB, memangkas baris komentar penuh dan baris kosong berlebih, dan membatasi total konteks (±16.000 token) dengan memotong berkas terbesar. Selisih token mentah vs terseleksi selalu ditampilkan.
 - **Kompaksi riwayat aksi (chat)** — rangkaian tool giliran-giliran lama dipadatkan menjadi ringkasan satu baris (`[Aksi selesai: tulis_file index.html — OK]`) sebelum giliran baru dimulai, jadi isi file yang pernah ditulis/dibaca model tidak dikirim ulang ke API di setiap giliran. Giliran terakhir tidak pernah disentuh kompaksi, sehingga `thought_signature` Gemini tetap utuh selama dibutuhkan.
 - **Anggaran & pencatatan** — pemakaian per penyedia per hari terlihat di `vibekit status`, sehingga boros selalu kelihatan.
+
+## Referensi Konfigurasi — Nilai yang Didukung
+
+Ringkasan semua field konfigurasi beserta nilai sahnya, supaya tidak perlu menebak.
+
+### `gaya.jawaban`
+
+Mengatur gaya system prompt hemat yang dikirim pada setiap permintaan. Tepat **tiga nilai** yang dikenal:
+
+| Nilai | Perilaku |
+|---|---|
+| `poin-penting` | **(bawaan)** Jawaban wajib hanya poin-poin penting dalam format poin; kalimat pembuka/penutup, sapaan, dan basa-basi dilarang keras; kode diberikan sebagai blok kode dengan penjelasan pendamping maksimal satu baris. Paling hemat token. |
+| `normal` | Ringkas dan langsung ke inti, tetapi kalimat biasa yang mengalir — tidak dipaksa bentuk poin, tidak sekaku `poin-penting`. |
+| `detail` | Jawaban jelas dan terstruktur; boleh panjang bila memang perlu, dengan subjudul atau poin agar mudah dibaca. Paling longgar (dan paling boros token) di antara ketiganya. |
+
+Nilai lain, nilai kosong, atau field yang tidak diisi **dianggap `poin-penting`**.
+
+### `gaya.maksTokenJawaban`
+
+Plafon token untuk **satu respons** model (dikirim sebagai `max_tokens`) — plafon, bukan target:
+
+| Nilai | Arti |
+|---|---|
+| Angka bulat `> 0` (mis. `800`, `4000`, `16000`) | Plafon sebesar itu; respons yang melewatinya dipotong. Lihat tabel anjuran pemakaian di bagian Mengatur Plafon Jawaban. |
+| `0`, atau field dihapus / tidak diisi | **Tanpa batas** — `max_tokens` tidak dikirim sama sekali; batas bawaan model yang berlaku. |
+| Bawaan template `init` | `800`. |
+
+### Field lain, sekilas
+
+| Field | Nilai / arti |
+|---|---|
+| `providers` | Array penyedia; **urutan = prioritas** — entri pertama adalah bawaan, berikutnya cadangan failover. |
+| `providers[].jedaCooldownMenit` | Menit istirahat sebuah penyedia setelah kena rate-limit singkat (HTTP 429 tanpa pola kuota). Bawaan `15`. Kuota yang benar-benar habis selalu cooldown sampai akhir hari lokal, berapa pun nilai field ini. |
+| `providers[].anggaranHarian` | **Opsional.** Batas token per hari yang dicatat lokal; penyedia yang mencapai batas dilewati sebelum dipanggil. Tidak diisi = tanpa anggaran lokal (hanya kuota asli penyedia yang berlaku). |
+| `providers[].apiKey` | Kunci API langsung, atau `env:NAMA_VAR` untuk membaca dari variabel lingkungan. |
+| `providers[].extraBody` | **Opsional.** Objek bebas yang digabung apa adanya ke body permintaan (kenop khas model/penyedia). |
+| `mcpServers` | **Opsional.** Daftar server MCP (lihat bagian Dukungan MCP): tiap entri wajib punya `nama` plus `perintah` (stdio lokal, dengan `argumen`/`env` opsional) atau `url` (HTTP remote, dengan `headers` opsional). |
 
 ## Pemecahan Masalah
 
@@ -168,7 +259,7 @@ Keputusan repo: `dist/` masuk `.gitignore` dan dibangun saat publish (`prepublis
 
 ## Status Nama di npm
 
-Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`; v0.3.0 menggabungkan kemampuan agent itu ke `ask` dan `chat`) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
+Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`; v0.3.0 menggabungkan kemampuan agent itu ke `ask` dan `chat`; v0.4.0 menambahkan mode auto-allow dan kompaksi riwayat aksi; v0.5.0 menambahkan dukungan MCP) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
 
 ## Lisensi
 
