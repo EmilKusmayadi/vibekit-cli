@@ -370,6 +370,12 @@ export interface OpsiGiliran {
   toolEkstra?: ToolDefinition[];
   /** Eksekutor untuk tool-tool tambahan di atas; wajib ada bila toolEkstra diisi. */
   eksekutorEkstra?: EksekutorEkstra;
+  /** Mode streaming: jawaban teks dialirkan lewat onToken (diteruskan ke router). */
+  stream?: boolean;
+  /** Dipanggil untuk setiap potongan teks jawaban saat streaming aktif. */
+  onToken?: (potongan: string) => void;
+  /** Dipanggil sekali saat token pertama tiba, dengan penyedia pemenangnya. */
+  onTokenPertama?: (provider: ProviderConfig) => void;
 }
 
 export interface HasilGiliran {
@@ -388,6 +394,8 @@ export interface HasilGiliran {
   pesanGagal?: string;
   /** true bila loop berhenti karena batas langkah tercapai (bukan jawaban akhir, bukan gagal router). */
   batasTercapai?: boolean;
+  /** true bila kegagalan berasal dari aliran streaming yang terputus di tengah jalan (jawaban parsial mungkin sudah tercetak). */
+  streamTerputus?: boolean;
 }
 
 /**
@@ -424,6 +432,9 @@ export async function jalankanGiliran(opsi: OpsiGiliran): Promise<HasilGiliran> 
       lokasiState: opsi.lokasiState,
       fetchImpl: opsi.fetchImpl,
       tools: semuaTool,
+      stream: opsi.stream,
+      onToken: opsi.onToken,
+      onTokenPertama: opsi.onTokenPertama,
     });
     catatan.push(...hasil.catatan);
 
@@ -437,6 +448,7 @@ export async function jalankanGiliran(opsi: OpsiGiliran): Promise<HasilGiliran> 
         jumlahLangkah: langkah,
         catatan,
         pesanGagal: hasil.pesan,
+        ...(hasil.streamTerputus ? { streamTerputus: true } : {}),
       };
     }
 
@@ -667,6 +679,26 @@ export function kompaksiRiwayatAksi(messages: ChatMessage[]): ChatMessage[] {
   return hasil;
 }
 
+export interface HasilKompaksi {
+  riwayat: ChatMessage[];
+  /** Token konten yang bersih dibuang kompaksi (selisih sebelum–sesudah, ≥ 0). */
+  tokenTerbuang: number;
+}
+
+/**
+ * Varian terukur dari kompaksiRiwayatAksi: selain riwayat hasil, kembalikan
+ * jumlah token yang benar-benar dibuang (dihitung dengan tokenizer atas
+ * konten pesan yang digantikan/dibuang, dikurangi ringkasan penggantinya).
+ * Inilah angka penghematan yang dicatat `vibekit hemat` — terukur, bukan
+ * klaim desain.
+ */
+export function kompaksiRiwayatAksiTerukur(messages: ChatMessage[]): HasilKompaksi {
+  const sebelum = messages.reduce((s, m) => s + tokenPesan(m), 0);
+  const riwayat = kompaksiRiwayatAksi(messages);
+  const sesudah = riwayat.reduce((s, m) => s + tokenPesan(m), 0);
+  return { riwayat, tokenTerbuang: Math.max(0, sebelum - sesudah) };
+}
+
 export interface OpsiAgent {
   config: VibekitConfig;
   /** Tugas dalam bahasa alami dari pengguna. */
@@ -686,6 +718,14 @@ export interface OpsiAgent {
   toolEkstra?: ToolDefinition[];
   /** Eksekutor untuk tool-tool tambahan di atas; diteruskan ke jalankanGiliran. */
   eksekutorEkstra?: EksekutorEkstra;
+  /** Pesan system tambahan (mis. brief proyek) yang disisipkan setelah system prompt agent, sebelum pesan tugas. */
+  konteksSistem?: string;
+  /** Mode streaming: diteruskan ke jalankanGiliran. */
+  stream?: boolean;
+  /** Dipanggil untuk setiap potongan teks jawaban saat streaming aktif. */
+  onToken?: (potongan: string) => void;
+  /** Dipanggil sekali saat token pertama tiba, dengan penyedia pemenangnya. */
+  onTokenPertama?: (provider: ProviderConfig) => void;
 }
 
 export interface HasilAgent {
@@ -704,6 +744,7 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
   const maksLangkah = opsi.maksLangkah ?? MAKS_LANGKAH_BAWAAN;
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT_AGENT },
+    ...(opsi.konteksSistem ? [{ role: "system", content: opsi.konteksSistem } as ChatMessage] : []),
     { role: "user", content: opsi.tugas },
   ];
   const hasil = await jalankanGiliran({
@@ -718,6 +759,9 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
     jejak: opsi.jejak,
     toolEkstra: opsi.toolEkstra,
     eksekutorEkstra: opsi.eksekutorEkstra,
+    stream: opsi.stream,
+    onToken: opsi.onToken,
+    onTokenPertama: opsi.onTokenPertama,
   });
   if (hasil.pesanGagal !== undefined) {
     return { ok: false, ringkasan: hasil.pesanGagal, jumlahLangkah: hasil.jumlahLangkah, catatan: hasil.catatan };
@@ -733,4 +777,142 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
     };
   }
   return { ok: true, ringkasan: hasil.jawabanAkhir, jumlahLangkah: hasil.jumlahLangkah, catatan: hasil.catatan };
+}
+
+export interface OpsiRencana {
+  config: VibekitConfig;
+  /** Tugas dalam bahasa alami dari pengguna. */
+  tugas: string;
+  lokasiState: string;
+  cwd: string;
+  /** Konfirmasi per aksi — TIDAK akan dipanggil saat rencana disetujui (eksekusi auto-allow); tetap wajib diisi untuk loop-nya. */
+  konfirmasi: Konfirmasi;
+  /**
+   * Dipanggil SEKALI dengan teks rencana hasil susunan model. true =
+   * jalankan rencana (mode auto-allow); false = batalkan tanpa menjalankan
+   * tool apa pun.
+   */
+  konfirmasiRencana: (rencana: string) => Promise<boolean>;
+  fetchImpl?: typeof fetch;
+  maksLangkah?: number;
+  jejak?: (pesan: string) => void;
+  toolEkstra?: ToolDefinition[];
+  eksekutorEkstra?: EksekutorEkstra;
+  konteksSistem?: string;
+  stream?: boolean;
+  onToken?: (potongan: string) => void;
+  onTokenPertama?: (provider: ProviderConfig) => void;
+}
+
+export interface HasilRencana {
+  status: "selesai" | "dibatalkan" | "gagal" | "batas";
+  /** Teks rencana yang disusun model ("" bila penyusunan rencana gagal). */
+  rencana: string;
+  /** Ringkasan eksekusi, atau pesan kegagalan/pembatalan. */
+  ringkasan: string;
+  jumlahLangkah: number;
+  catatan: CatatanPenyedia[];
+}
+
+/**
+ * Mode rencana (`vibekit do --rencana`): dua tahap.
+ * 1. Susun rencana: SATU panggilan router TANPA tools — model hanya menulis
+ *    rencana langkah bernomor yang ringkas (gaya dari konfigurasi tetap
+ *    ditambahkan router).
+ * 2. Konfirmasi SATU kali lewat `konfirmasiRencana`. Ditolak → selesai
+ *    tanpa menjalankan tool apa pun. Disetujui → rencana disuntikkan ke
+ *    konteks tugas dan loop agent berjalan dengan autoAllow AKTIF
+ *    (persetujuan rencana = persetujuan eksekusi); pagar cwd dan batas
+ *    langkah tetap berlaku persis seperti mode biasa.
+ */
+export async function jalankanAgentRencana(opsi: OpsiRencana): Promise<HasilRencana> {
+  const maksLangkah = opsi.maksLangkah ?? MAKS_LANGKAH_BAWAAN;
+  const hasilRencana = await tanyaRouter({
+    config: opsi.config,
+    messages: [
+      {
+        role: "user",
+        content:
+          "Susun rencana langkah bernomor yang ringkas untuk tugas berikut. " +
+          "Tulis HANYA daftar rencananya — jangan menjalankan apa pun, jangan memanggil tool apa pun.\n\n" +
+          `Tugas: ${opsi.tugas}`,
+      },
+    ],
+    lokasiState: opsi.lokasiState,
+    fetchImpl: opsi.fetchImpl,
+  });
+  if (!hasilRencana.ok) {
+    return {
+      status: "gagal",
+      rencana: "",
+      ringkasan: hasilRencana.pesan,
+      jumlahLangkah: 0,
+      catatan: hasilRencana.catatan,
+    };
+  }
+  const rencana = hasilRencana.jawaban.trim();
+  if (!rencana) {
+    return {
+      status: "gagal",
+      rencana: "",
+      ringkasan: "Model tidak menghasilkan rencana (jawaban kosong).",
+      jumlahLangkah: 0,
+      catatan: hasilRencana.catatan,
+    };
+  }
+
+  const disetujui = await opsi.konfirmasiRencana(rencana);
+  if (!disetujui) {
+    return {
+      status: "dibatalkan",
+      rencana,
+      ringkasan: "Rencana ditolak pengguna — tidak ada tool yang dijalankan.",
+      jumlahLangkah: 0,
+      catatan: hasilRencana.catatan,
+    };
+  }
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT_AGENT },
+    ...(opsi.konteksSistem ? [{ role: "system", content: opsi.konteksSistem } as ChatMessage] : []),
+    {
+      role: "user",
+      content:
+        `${opsi.tugas}\n\n` +
+        "Rencana berikut SUDAH DISETUJUI pengguna — ikuti rencana ini langkah demi langkah:\n" +
+        rencana,
+    },
+  ];
+  const hasil = await jalankanGiliran({
+    config: opsi.config,
+    messages,
+    lokasiState: opsi.lokasiState,
+    cwd: opsi.cwd,
+    konfirmasi: opsi.konfirmasi,
+    autoAllow: true,
+    fetchImpl: opsi.fetchImpl,
+    maksLangkah: opsi.maksLangkah,
+    jejak: opsi.jejak,
+    toolEkstra: opsi.toolEkstra,
+    eksekutorEkstra: opsi.eksekutorEkstra,
+    stream: opsi.stream,
+    onToken: opsi.onToken,
+    onTokenPertama: opsi.onTokenPertama,
+  });
+  const catatan = [...hasilRencana.catatan, ...hasil.catatan];
+  if (hasil.pesanGagal !== undefined) {
+    return { status: "gagal", rencana, ringkasan: hasil.pesanGagal, jumlahLangkah: hasil.jumlahLangkah, catatan };
+  }
+  if (hasil.batasTercapai) {
+    return {
+      status: "batas",
+      rencana,
+      ringkasan:
+        `Batas langkah tercapai (${maksLangkah} langkah) sebelum rencana selesai dijalankan. ` +
+        "Jalankan lagi perintah yang sama untuk melanjutkan, atau persempit tugasnya.",
+      jumlahLangkah: hasil.jumlahLangkah,
+      catatan,
+    };
+  }
+  return { status: "selesai", rencana, ringkasan: hasil.jawabanAkhir, jumlahLangkah: hasil.jumlahLangkah, catatan };
 }

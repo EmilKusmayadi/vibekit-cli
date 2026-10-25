@@ -74,10 +74,13 @@ vibekit status
 | Perintah | Fungsi |
 |---|---|
 | `vibekit init` | Buat `~/.vibekit/config.json` dari template (tidak menimpa yang sudah ada) |
-| `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]... [--auto]` | Satu pertanyaan yang boleh berakhir dengan aksi; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
-| `vibekit chat [--auto]` | Percakapan interaktif yang juga bisa bertindak di tengah obrolan; riwayat aksi lama dipadatkan jadi ringkasan lalu dipangkas sadar-tool (maks ±4.000 token, hanya pada batas giliran utuh); `/keluar` untuk berhenti, `/auto` untuk menyala-matikan mode auto-allow |
-| `vibekit do "<tugas>"` | Mode agent sekali jalan: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah) |
+| `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]... [--auto] [--tanpa-brief]` | Satu pertanyaan yang boleh berakhir dengan aksi; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
+| `vibekit chat [--auto] [--lanjut] [--tanpa-brief]` | Percakapan interaktif yang juga bisa bertindak di tengah obrolan; riwayat aksi lama dipadatkan jadi ringkasan lalu dipangkas sadar-tool (maks ±4.000 token, hanya pada batas giliran utuh); `/keluar` untuk berhenti, `/auto` untuk menyala-matikan mode auto-allow, `/sesi` menampilkan id sesi aktif. Sesi tersimpan otomatis dan bisa dilanjutkan dengan `--lanjut` |
+| `vibekit do "<tugas>" [--auto] [--rencana] [--tanpa-brief]` | Mode agent sekali jalan: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah). `--rencana`: susun rencana dulu, persetujuan SATU kali, lalu eksekusi |
 | `vibekit mcp` | Sambungkan semua server MCP dari konfigurasi dan daftar tool yang mereka sediakan (lihat bagian Dukungan MCP di bawah) |
+| `vibekit brief` | Susun ringkasan konteks proyek ke `.vibekit/brief.md`; brief dipakai otomatis sebagai konteks pada ask/chat/do (lihat bagian Brief Proyek) |
+| `vibekit hemat` | Laporan pemakaian token per penyedia (hari ini & 7 hari terakhir) + token yang terukur dihemat kompaksi riwayat |
+| `vibekit sesi` | Daftar sesi chat yang tersimpan (untuk dilanjutkan dengan `chat --lanjut`) |
 | `vibekit status` | Tabel per penyedia: model, status (aktif / cooldown s.d. jam / anggaran tercapai), token terpakai hari ini |
 | `vibekit --help` / `--version` | Bantuan / versi |
 
@@ -164,6 +167,55 @@ Perintah ini menyambungkan semua server di `mcpServers`, mencetak daftar tool pe
 
 Tool MCP adalah **aksi pihak ketiga** yang dijalankan atas nama Anda, jadi perlakuannya sama dengan tool mutasi bawaan: **selalu meminta konfirmasi Anda satu per satu** (pratinjau menampilkan nama tool + argumennya), dan penolakan dilaporkan ke model. Mode auto-allow (`--auto`/`--yes`/`/auto`) melewati konfirmasi itu juga untuk tool MCP — aktifkan hanya bila Anda mempercayai server MCP yang terdaftar dan tugasnya. Sambungkan hanya server MCP yang Anda kenal sumbernya.
 
+## Laporan Pemakaian — `vibekit hemat`
+
+Menampilkan pemakaian token per penyedia untuk **hari ini** dan **7 hari terakhir**, ditambah token yang **terukur** dibuang oleh kompaksi riwayat chat (hari ini + total tercatat):
+
+```bash
+vibekit hemat
+```
+
+Soal kejujuran angka: hanya penghematan kompaksi yang diangkakan, karena memang bisa dihitung persis dari konten yang dibuang. Penghematan dari gaya jawaban ringkas dan konteks terseleksi bersifat *desain* (mencegah token terpakai sejak awal) dan dinyatakan sebagai catatan, bukan angka karangan.
+
+## Streaming Jawaban
+
+Jawaban pada `ask` dan `chat`, serta ringkasan akhir `do`, **dialirkan (streaming)**: teks tampil potongan demi potongan begitu model menulisnya, bukan menunggu selesai semua. Aturan failover-nya:
+
+- Error HTTP **sebelum token pertama** (429 kuota, 503, dll.) diperlakukan persis seperti mode biasa: retry/cooldown/failover ke penyedia berikutnya.
+- Error **di tengah aliran, setelah sebagian jawaban tampil**, TIDAK di-failover — mengulang ke penyedia lain akan menggandakan keluaran. Giliran dinyatakan gagal dengan pesan khusus, dan di chat giliran itu digulung balik seperti kegagalan lain.
+- Pemakaian token tetap tercatat: dari `usage` di akhir aliran bila penyedia mengirimnya, atau estimasi tokenizer lokal atas teks yang terakumulasi.
+
+## Mode Rencana — `vibekit do "<tugas>" --rencana`
+
+Untuk tugas besar yang ingin Anda periksa dulu arahnya:
+
+```bash
+vibekit do "rapikan struktur folder src dan perbarui README" --rencana
+```
+
+Alurnya: (1) model menyusun **rencana langkah bernomor** (satu panggilan tanpa tool); (2) rencana dicetak dan Anda ditanya **satu kali**: `Jalankan rencana ini? (y/N)`; (3) ditolak → tidak ada satu pun tool yang berjalan, perintah selesai normal; (4) disetujui → rencana disuntikkan ke konteks tugas dan eksekusi berjalan **tanpa konfirmasi per langkah** (persetujuan rencana = persetujuan eksekusi). Pagar folder kerja dan batas 12 langkah tetap berlaku penuh.
+
+## Sesi Chat Tersimpan — `chat --lanjut` & `vibekit sesi`
+
+Setiap sesi `vibekit chat` **tersimpan otomatis** (di `~/.vibekit/sesi/`) setelah setiap giliran yang berhasil — riwayat internal disimpan apa adanya, termasuk pesan mentah tool, jadi sesi yang dilanjutkan tetap sah untuk model seperti Gemini 3.
+
+```bash
+vibekit sesi            # daftar sesi: id, waktu, jumlah pesan, cuplikan
+vibekit chat --lanjut   # lanjutkan sesi terakhir persis dari tempat berhenti
+```
+
+Di tengah sesi, perintah `/sesi` menampilkan id sesi aktif. Tanpa `--lanjut`, `vibekit chat` selalu memulai sesi baru seperti biasa. Kompaksi dan pemangkasan aman tetap diterapkan per giliran pada sesi lanjutan.
+
+## Brief Proyek — `vibekit brief`
+
+Memindai folder kerja (pohon maks 3 tingkat, melewati `node_modules`/`.git`/`dist`/`build`/file biner) dan menyusun ringkasan konteks yang padat ke **`.vibekit/brief.md`**: nama proyek, bahasa dominan, stack & dependencies dari `package.json`, scripts, file konfigurasi penting yang terdeteksi (hanya nama — isi `.env` asli tidak pernah dibaca), ekstensi terbanyak, struktur folder, dan potongan awal README.
+
+```bash
+cd proyek-saya && vibekit brief
+```
+
+Setelah brief ada, `ask`/`chat`/`do` **memakai brief itu otomatis** sebagai konteks tambahan (dicetak satu baris `(memakai brief proyek: ±N token)`; brief di atas 4.000 token dipotong dengan penanda). Lewatkan per perintah dengan flag `--tanpa-brief`. Jalankan ulang `vibekit brief` bila struktur proyek berubah banyak.
+
 ## Cara Failover Bekerja
 
 1. Sebelum memanggil, router memeriksa state lokal (`~/.vibekit/state.json`): penyedia yang masih **cooldown** atau sudah mencapai **anggaran harian** dilewati tanpa dipanggil.
@@ -177,8 +229,9 @@ Tool MCP adalah **aksi pihak ketiga** yang dijalankan atas nama Anda, jadi perla
 - **System prompt ringkas** — gaya `poin-penting` memerintahkan model menjawab hanya poin penting tanpa basa-basi; tersedia juga `normal` dan `detail`.
 - **Plafon jawaban** — `maksTokenJawaban` menjadi `max_tokens` di setiap permintaan bila diatur > 0; `0` (atau field dihapus) berarti tanpa batas. Ini plafon, bukan target — lihat tabel anjuran di bagian Mulai Cepat.
 - **Konteks terseleksi** — `--file/--dir` melewati file biner & file > 256 KB, memangkas baris komentar penuh dan baris kosong berlebih, dan membatasi total konteks (±16.000 token) dengan memotong berkas terbesar. Selisih token mentah vs terseleksi selalu ditampilkan.
-- **Kompaksi riwayat aksi (chat)** — rangkaian tool giliran-giliran lama dipadatkan menjadi ringkasan satu baris (`[Aksi selesai: tulis_file index.html — OK]`) sebelum giliran baru dimulai, jadi isi file yang pernah ditulis/dibaca model tidak dikirim ulang ke API di setiap giliran. Giliran terakhir tidak pernah disentuh kompaksi, sehingga `thought_signature` Gemini tetap utuh selama dibutuhkan.
-- **Anggaran & pencatatan** — pemakaian per penyedia per hari terlihat di `vibekit status`, sehingga boros selalu kelihatan.
+- **Kompaksi riwayat aksi (chat)** — rangkaian tool giliran-giliran lama dipadatkan menjadi ringkasan satu baris (`[Aksi selesai: tulis_file index.html — OK]`) sebelum giliran baru dimulai, jadi isi file yang pernah ditulis/dibaca model tidak dikirim ulang ke API di setiap giliran. Giliran terakhir tidak pernah disentuh kompaksi, sehingga `thought_signature` Gemini tetap utuh selama dibutuhkan. Token yang dibuang kompaksi **diukur dan dicatat** — lihat laporannya di `vibekit hemat`.
+- **Brief proyek** — `.vibekit/brief.md` memberi model konteks proyek yang padat dan stabil, jauh lebih murah daripada melampirkan banyak file mentah berulang kali.
+- **Anggaran & pencatatan** — pemakaian per penyedia per hari terlihat di `vibekit status` dan laporan lengkapnya di `vibekit hemat`, sehingga boros selalu kelihatan.
 
 ## Referensi Konfigurasi — Nilai yang Didukung
 
@@ -259,7 +312,7 @@ Keputusan repo: `dist/` masuk `.gitignore` dan dibangun saat publish (`prepublis
 
 ## Status Nama di npm
 
-Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`; v0.3.0 menggabungkan kemampuan agent itu ke `ask` dan `chat`; v0.4.0 menambahkan mode auto-allow dan kompaksi riwayat aksi; v0.5.0 menambahkan dukungan MCP) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
+Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`; v0.3.0 menggabungkan kemampuan agent itu ke `ask` dan `chat`; v0.4.0 menambahkan mode auto-allow dan kompaksi riwayat aksi; v0.5.0 menambahkan dukungan MCP; v0.6.0 menambahkan laporan `hemat`, streaming jawaban, mode `--rencana`, sesi chat yang bisa dilanjutkan, dan brief proyek) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
 
 ## Lisensi
 

@@ -2,6 +2,7 @@ import { selesaikanApiKey } from "./config.js";
 import { systemPromptHemat } from "./prompt.js";
 import {
   akhirHariIni,
+  catatPemakaianHarian,
   formatJam,
   muatState,
   sedangCooldown,
@@ -36,6 +37,12 @@ export type HasilTanya =
       ok: false;
       pesan: string;
       catatan: CatatanPenyedia[];
+      /**
+       * true bila kegagalan terjadi di TENGAH aliran streaming setelah ada
+       * token yang keluar: permintaan TIDAK di-failover (menghindari keluaran
+       * ganda), dan sebagian jawaban mungkin sudah tercetak ke pengguna.
+       */
+      streamTerputus?: boolean;
     };
 
 type JenisError = "kuota" | "rate-limit" | "lainnya";
@@ -58,6 +65,129 @@ export function klasifikasiError(status: number, bodyTeks: string): { jenis: Jen
   return { jenis: "lainnya", ringkas: `HTTP ${status} ${potongan}`.trim() };
 }
 
+type HasilAliran =
+  | { jenis: "sukses"; data: { choices: unknown[]; usage?: unknown } }
+  | { jenis: "pra-token"; alasan: string }
+  | { jenis: "tengah"; alasan: string };
+
+/**
+ * Baca aliran SSE (mode streaming) dari respons penyedia dan rakit menjadi
+ * objek `data` yang SETARA BENTUKNYA dengan respons non-streaming:
+ * `choices[0].message` berisi content terakumulasi dan tool_calls yang sudah
+ * digabung per `index` — termasuk `extra_content` (thought_signature Gemini)
+ * bila muncul pada delta tool_call, agar riwayat & kompaksi tetap bekerja.
+ *
+ * Hasil dibedakan menurut kapan kegagalan terjadi:
+ * - "pra-token": aliran gagal sebelum ada keluaran apa pun → pemanggil boleh
+ *   memperlakukannya sebagai kegagalan penyedia biasa (failover).
+ * - "tengah": aliran putus SETELAH ada token keluar → pemanggil TIDAK BOLEH
+ *   failover karena akan menggandakan keluaran ke pengguna.
+ */
+async function bacaAliranSSE(
+  respons: Response,
+  provider: ProviderConfig,
+  opsi: OpsiTanya,
+  timeoutMs: number
+): Promise<HasilAliran> {
+  const body = respons.body;
+  if (!body) return { jenis: "pra-token", alasan: "respons streaming tidak memiliki body" };
+  const pembaca = body.getReader();
+  const dekoder = new TextDecoder();
+  let buffer = "";
+  let konten = "";
+  const perIndeks = new Map<number, { id: string; nama: string; argumen: string; extraContent?: unknown }>();
+  let usage: unknown;
+  let adaKeluaran = false;
+  let tokenPertamaDilaporkan = false;
+
+  const prosesBaris = (baris: string): void => {
+    const rapi = baris.trim();
+    if (!rapi.startsWith("data:")) return;
+    const muatan = rapi.slice("data:".length).trim();
+    if (!muatan || muatan === "[DONE]") return;
+    let potong: any;
+    try {
+      potong = JSON.parse(muatan);
+    } catch {
+      return; // baris data rusak/komentar: lewati, jangan gagalkan aliran
+    }
+    if (potong?.usage) usage = potong.usage;
+    const delta = Array.isArray(potong?.choices) ? potong.choices[0]?.delta : undefined;
+    if (!delta) return;
+    if (typeof delta.content === "string" && delta.content !== "") {
+      konten += delta.content;
+      adaKeluaran = true;
+      if (!tokenPertamaDilaporkan) {
+        tokenPertamaDilaporkan = true;
+        opsi.onTokenPertama?.(provider);
+      }
+      opsi.onToken?.(delta.content);
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const dtc of delta.tool_calls) {
+        const indeks = typeof dtc?.index === "number" ? dtc.index : 0;
+        let entri = perIndeks.get(indeks);
+        if (!entri) {
+          entri = { id: "", nama: "", argumen: "" };
+          perIndeks.set(indeks, entri);
+        }
+        if (typeof dtc.id === "string" && dtc.id) entri.id = dtc.id;
+        if (typeof dtc.function?.name === "string") entri.nama += dtc.function.name;
+        if (typeof dtc.function?.arguments === "string") entri.argumen += dtc.function.arguments;
+        if (dtc.extra_content !== undefined) entri.extraContent = dtc.extra_content;
+        adaKeluaran = true;
+      }
+    }
+  };
+
+  let waktuHabis = false;
+  const pengatur = setTimeout(() => {
+    waktuHabis = true;
+    pembaca.cancel().catch(() => {});
+  }, timeoutMs);
+  try {
+    for (;;) {
+      const { done, value } = await pembaca.read();
+      if (done) break;
+      buffer += dekoder.decode(value, { stream: true });
+      let idx = buffer.indexOf("\n");
+      while (idx >= 0) {
+        prosesBaris(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+        idx = buffer.indexOf("\n");
+      }
+    }
+    if (buffer.trim()) prosesBaris(buffer);
+  } catch (e) {
+    const alasan = `aliran streaming terputus: ${(e as Error).message}`;
+    return adaKeluaran ? { jenis: "tengah", alasan } : { jenis: "pra-token", alasan };
+  } finally {
+    clearTimeout(pengatur);
+  }
+  if (waktuHabis) {
+    const alasan = `aliran streaming melewati batas waktu ${timeoutMs} ms`;
+    return adaKeluaran ? { jenis: "tengah", alasan } : { jenis: "pra-token", alasan };
+  }
+
+  const toolCalls = [...perIndeks.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, e]) => ({
+      ...(e.id ? { id: e.id } : {}),
+      type: "function",
+      function: { name: e.nama, arguments: e.argumen },
+      ...(e.extraContent !== undefined ? { extra_content: e.extraContent } : {}),
+    }));
+  const pesan: Record<string, unknown> = {
+    role: "assistant",
+    content: konten === "" ? null : konten,
+  };
+  if (toolCalls.length > 0) pesan.tool_calls = toolCalls;
+  return {
+    jenis: "sukses",
+    data: { choices: [{ message: pesan }], ...(usage !== undefined ? { usage } : {}) },
+  };
+}
+
 interface OpsiTanya {
   config: VibekitConfig;
   /** Pesan percakapan TANPA system prompt (router menambahkannya dari gaya). */
@@ -71,6 +201,17 @@ interface OpsiTanya {
   tungguImpl?: (ms: number) => Promise<void>;
   /** Definisi tool (function calling) yang ditawarkan ke model; diteruskan apa adanya ke body permintaan. */
   tools?: ToolDefinition[];
+  /**
+   * Mode streaming: jawaban teks dialirkan potongan demi potongan lewat
+   * `onToken` begitu tiba (SSE). Error HTTP sebelum token pertama diperlakukan
+   * seperti jalur biasa (retry 503 / cooldown / failover); error SETELAH ada
+   * token keluar tidak di-failover — lihat `streamTerputus` pada hasil gagal.
+   */
+  stream?: boolean;
+  /** Dipanggil untuk setiap potongan teks jawaban (delta.content) saat streaming. */
+  onToken?: (potongan: string) => void;
+  /** Dipanggil SEKALI saat token pertama tiba, dengan penyedia yang memenangkannya. */
+  onTokenPertama?: (provider: ProviderConfig) => void;
 }
 
 /**
@@ -83,6 +224,10 @@ interface OpsiTanya {
  *   2 kali dengan jeda (3 dtk, 8 dtk) sebelum menyerah ke penyedia berikutnya;
  *   503 tidak memicu cooldown.
  * - Error lain (401, 400, jaringan) tidak dianggap kuota habis; dicatat dan lanjut ke berikutnya.
+ * - Mode streaming (opsi.stream): aturan di atas berlaku untuk error yang
+ *   terjadi SEBELUM token pertama (status HTTP / aliran kosong). Error di
+ *   tengah aliran setelah token keluar TIDAK di-failover; hasilnya gagal
+ *   dengan `streamTerputus: true`.
  */
 export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
   const fetchImpl = opsi.fetchImpl ?? fetch;
@@ -153,6 +298,12 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
       ...(opsi.tools && opsi.tools.length > 0 ? { tools: opsi.tools } : {}),
       ...(provider.extraBody ?? {}),
     };
+    if (opsi.stream) {
+      // include_usage agar token terpakai tetap dilaporkan penyedia di akhir
+      // aliran; penyedia yang tidak mengirim usage diestimasi secara lokal.
+      body.stream = true;
+      body.stream_options = { include_usage: true };
+    }
 
     let respons: Response | undefined;
     let teks = "";
@@ -179,10 +330,16 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
         gagalJaringan = `gagal jaringan: ${(e as Error).message}`;
         break;
       }
-      teks = await respons.text();
       // 503 = server penyedia sedang penuh sesaat: coba ulang penyedia yang sama
-      // dengan jeda sebelum menyerah ke penyedia berikutnya.
+      // dengan jeda sebelum menyerah ke penyedia berikutnya. Keputusan dibuat
+      // dari STATUS (header) sebelum body dibaca, supaya body — terutama aliran
+      // streaming — tidak terkonsumsi oleh percobaan yang akan diulang.
       if (respons.status === 503 && percobaan503 < jedaRetry503.length) {
+        try {
+          await respons.body?.cancel();
+        } catch {
+          /* abaikan: body percobaan gagal memang dibuang */
+        }
         await tunggu(jedaRetry503[percobaan503]);
         percobaan503++;
         continue;
@@ -199,6 +356,7 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
     }
 
     if (!respons.ok) {
+      teks = await respons.text();
       const { jenis, ringkas } = klasifikasiError(respons.status, teks);
       entri.alasanTerakhir = ringkas;
       if (jenis === "kuota") {
@@ -219,14 +377,42 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
     }
 
     let data: any;
-    try {
-      data = JSON.parse(teks);
-    } catch {
-      const alasan = "respons bukan JSON yang valid";
-      entri.alasanTerakhir = alasan;
-      simpanState(opsi.lokasiState, state);
-      catatan.push({ nama: provider.nama, model: provider.model, status: "gagal", alasan });
-      continue;
+    if (opsi.stream && respons.body) {
+      const aliran = await bacaAliranSSE(respons, provider, opsi, timeoutMs);
+      if (aliran.jenis === "pra-token") {
+        // Belum ada token yang keluar: kegagalan penyedia biasa, failover lanjut.
+        entri.alasanTerakhir = aliran.alasan;
+        simpanState(opsi.lokasiState, state);
+        catatan.push({ nama: provider.nama, model: provider.model, status: "gagal", alasan: aliran.alasan });
+        continue;
+      }
+      if (aliran.jenis === "tengah") {
+        // Token sudah keluar ke pengguna: JANGAN failover (keluaran akan
+        // ganda). Laporkan sebagai kegagalan giliran khusus.
+        entri.alasanTerakhir = aliran.alasan;
+        simpanState(opsi.lokasiState, state);
+        catatan.push({ nama: provider.nama, model: provider.model, status: "gagal", alasan: aliran.alasan });
+        return {
+          ok: false,
+          pesan:
+            `Aliran jawaban dari ${provider.nama} (${provider.model}) terputus di tengah jalan — ${aliran.alasan}. ` +
+            "Sebagian jawaban mungkin sudah tampil; permintaan TIDAK diulang ke penyedia lain agar keluaran tidak ganda.",
+          catatan,
+          streamTerputus: true,
+        };
+      }
+      data = aliran.data;
+    } else {
+      teks = await respons.text();
+      try {
+        data = JSON.parse(teks);
+      } catch {
+        const alasan = "respons bukan JSON yang valid";
+        entri.alasanTerakhir = alasan;
+        simpanState(opsi.lokasiState, state);
+        catatan.push({ nama: provider.nama, model: provider.model, status: "gagal", alasan });
+        continue;
+      }
     }
 
     const pesanMentah = data?.choices?.[0]?.message;
@@ -273,6 +459,7 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
     }
 
     entri.totalToken += tokenTerpakai;
+    catatPemakaianHarian(state, provider.nama, tokenTerpakai, sekarang);
     entri.alasanTerakhir = null;
     simpanState(opsi.lokasiState, state);
 

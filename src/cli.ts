@@ -2,31 +2,44 @@
 import readline from "node:readline";
 import {
   buatConfigGlobal,
+  configDir,
   globalConfigPath,
   muatConfig,
   statePath,
 } from "./config.js";
 import {
   jalankanAgent,
+  jalankanAgentRencana,
   jalankanGiliran,
-  kompaksiRiwayatAksi,
+  kompaksiRiwayatAksiTerukur,
   pangkasRiwayatAman,
   SYSTEM_PROMPT_GABUNGAN,
   type Konfirmasi,
 } from "./agent.js";
 import { teksBanner } from "./banner.js";
+import { AWALAN_KONTEKS_BRIEF, buatBrief, muatKonteksBrief } from "./brief.js";
 import { bangunKonteks } from "./context.js";
 import { sambungkanMcpServers } from "./mcp.js";
 import {
+  buatIdSesi,
+  daftarSesi,
+  folderSesi,
+  muatSesiTerakhir,
+  simpanSesi,
+  type SesiChat,
+} from "./sesi.js";
+import {
+  bangunLaporanHemat,
+  catatHematKompaksi,
   formatJam,
   muatState,
   sedangCooldown,
   statePenyedia,
 } from "./state.js";
 import { formatAngka } from "./token.js";
-import type { ChatMessage, ToolDefinition, VibekitConfig } from "./types.js";
+import type { ChatMessage, ProviderConfig, ToolDefinition, VibekitConfig } from "./types.js";
 
-const VERSI = "0.5.0";
+const VERSI = "0.6.0";
 const BATAS_TOKEN_RIWAYAT = 4000;
 
 function bantuan(): void {
@@ -35,9 +48,12 @@ function bantuan(): void {
 Penggunaan:
   vibekit init                          Buat ~/.vibekit/config.json dari template
   vibekit ask "<pertanyaan>" [opsi]     Tanya sekali (bisa bertindak: membuat file & menjalankan perintah dengan persetujuanmu)
-  vibekit chat                          Percakapan interaktif yang juga bisa bertindak (perintah /keluar untuk berhenti)
-  vibekit do "<tugas>"                  Mode agent sekali jalan: kerjakan tugas dengan tool file/perintah di folder ini
+  vibekit chat [opsi]                   Percakapan interaktif yang juga bisa bertindak (perintah /keluar untuk berhenti)
+  vibekit do "<tugas>" [opsi]           Mode agent sekali jalan: kerjakan tugas dengan tool file/perintah di folder ini
   vibekit mcp                           Daftar tool dari server MCP pada konfigurasi (field mcpServers)
+  vibekit brief                         Susun ringkasan konteks proyek ke .vibekit/brief.md (dipakai otomatis sebagai konteks)
+  vibekit hemat                         Laporan pemakaian token (hari ini & 7 hari) + token yang dihemat kompaksi riwayat
+  vibekit sesi                          Daftar sesi chat tersimpan (bisa dilanjutkan dengan chat --lanjut)
   vibekit status                        Status & pemakaian token tiap penyedia hari ini
   vibekit --help                        Tampilkan bantuan ini
   vibekit --version                     Tampilkan versi
@@ -47,10 +63,26 @@ Opsi ask:
   --dir <path>     Lampirkan isi folder sebagai konteks (boleh diulang)
   --auto, --yes    Mode auto-allow: aksi tulis/perintah langsung dijalankan
                    tanpa persetujuan (tetap terkunci di folder kerja)
+  --tanpa-brief   Lewatkan brief proyek (.vibekit/brief.md) untuk pertanyaan ini
 
-Opsi chat & do:
-  --auto, --yes    Mode auto-allow seperti di atas. Di tengah sesi chat,
-                   perintah /auto menyalakan/mematikan mode ini kapan saja.
+Opsi chat:
+  --lanjut         Lanjutkan sesi chat terakhir yang tersimpan (riwayat dipulihkan)
+  --auto, --yes    Mode auto-allow seperti di atas; di tengah sesi, perintah
+                   /auto menyalakan/mematikannya kapan saja, /sesi menampilkan
+                   id sesi aktif, /keluar untuk berhenti
+  --tanpa-brief   Lewatkan brief proyek untuk sesi ini
+
+Opsi do:
+  --auto, --yes    Mode auto-allow seperti di atas
+  --rencana        Susun rencana langkah dulu, minta persetujuanmu SATU kali,
+                   lalu jalankan rencana itu tanpa konfirmasi per langkah
+  --tanpa-brief   Lewatkan brief proyek untuk tugas ini
+
+Streaming:
+  Jawaban ask/chat dan ringkasan akhir do tampil mengalir (streaming) begitu
+  model menulisnya. Bila aliran terputus di TENGAH jalan setelah sebagian
+  jawaban tampil, permintaan tidak diulang ke penyedia lain agar keluaran
+  tidak ganda; error sebelum token pertama tetap di-failover seperti biasa.
 
 Kemampuan agent (ask, chat, do):
   Sejak v0.3.0 ketiga perintah itu bisa bertindak, bukan hanya menjawab:
@@ -141,6 +173,7 @@ interface OpsiAsk {
   files: string[];
   dirs: string[];
   auto: boolean;
+  tanpaBrief: boolean;
 }
 
 function uraiArgAsk(args: string[]): OpsiAsk | { error: string } {
@@ -148,6 +181,7 @@ function uraiArgAsk(args: string[]): OpsiAsk | { error: string } {
   const dirs: string[] = [];
   const sisa: string[] = [];
   let auto = false;
+  let tanpaBrief = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--file") {
@@ -164,13 +198,29 @@ function uraiArgAsk(args: string[]): OpsiAsk | { error: string } {
       dirs.push(a.slice("--dir=".length));
     } else if (a === "--auto" || a === "--yes") {
       auto = true;
+    } else if (a === "--tanpa-brief") {
+      tanpaBrief = true;
     } else {
       sisa.push(a);
     }
   }
   const pertanyaan = sisa.join(" ").trim();
   if (!pertanyaan) return { error: "Pertanyaan kosong. Contoh: vibekit ask \"apa itu API?\"" };
-  return { pertanyaan, files, dirs, auto };
+  return { pertanyaan, files, dirs, auto, tanpaBrief };
+}
+
+/**
+ * Siapkan pesan konteks brief proyek (.vibekit/brief.md di cwd) untuk
+ * disuntikkan setelah system prompt. Mengembalikan teks pesan system, atau
+ * null bila brief tidak ada / dilewatkan lewat --tanpa-brief. Satu baris
+ * info dicetak ke stderr saat brief dipakai.
+ */
+function siapkanKonteksBrief(cwd: string, tanpaBrief: boolean): string | null {
+  if (tanpaBrief) return null;
+  const brief = muatKonteksBrief(cwd);
+  if (!brief) return null;
+  console.error(`[vibekit] (memakai brief proyek: ±${formatAngka(brief.token)} token)`);
+  return brief.teks;
 }
 
 /**
@@ -257,25 +307,37 @@ async function perintahAsk(args: string[]): Promise<number> {
   // Sejak v0.3.0 ask menjalankan SATU giliran agent: pertanyaan biasa dijawab
   // teks langsung, permintaan membuat file/perintah dijalankan lewat tool
   // dengan konfirmasi — pagar keamanan yang sama seperti `do`.
+  const cwd = process.cwd();
+  const konteksBrief = siapkanKonteksBrief(cwd, urai.tanpaBrief);
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT_GABUNGAN },
+    ...(konteksBrief ? [{ role: "system", content: konteksBrief } as ChatMessage] : []),
     { role: "user", content: isiUser },
   ];
   if (urai.auto) cetakPeringatanAuto();
   const mcp = await siapkanMcp(config);
   const pembaca = buatPembacaBaris();
   try {
+    // Jawaban dialirkan (streaming) ke stdout potongan demi potongan; jejak
+    // langkah tetap ke stderr agar stdout bersih untuk jawaban.
+    let sudahMengalir = false;
     const hasil = await jalankanGiliran({
       config,
       messages,
       lokasiState: statePath(),
-      cwd: process.cwd(),
+      cwd,
       konfirmasi: buatKonfirmasi(pembaca),
       autoAllow: urai.auto,
       jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+      stream: true,
+      onToken: (potongan) => {
+        sudahMengalir = true;
+        process.stdout.write(potongan);
+      },
       ...(mcp ? { toolEkstra: mcp.toolEkstra, eksekutorEkstra: mcp.eksekutorEkstra } : {}),
     });
     if (!hasil.ok) {
+      if (sudahMengalir) process.stdout.write("\n");
       if (hasil.batasTercapai) {
         console.error(
           `[vibekit] Batas langkah tercapai (${hasil.jumlahLangkah} langkah) sebelum pertanyaan ini selesai dikerjakan. Persempit permintaanmu, atau gunakan vibekit do untuk mode tugas.`
@@ -285,7 +347,11 @@ async function perintahAsk(args: string[]): Promise<number> {
       }
       return 1;
     }
-    console.log(hasil.jawabanAkhir);
+    if (sudahMengalir) {
+      process.stdout.write("\n");
+    } else {
+      console.log(hasil.jawabanAkhir);
+    }
     if (hasil.providerTerakhir) {
       const sumber = hasil.tokenSumber === "usage" ? "dari usage API" : "estimasi";
       console.log(
@@ -313,13 +379,53 @@ async function perintahChat(args: string[]): Promise<number> {
   // Mode auto-allow bisa dinyalakan dari flag --auto/--yes, lalu diubah
   // kapan saja di tengah sesi dengan perintah /auto.
   let autoAktif = args.includes("--auto") || args.includes("--yes");
+  const lanjut = args.includes("--lanjut");
+  const tanpaBrief = args.includes("--tanpa-brief");
+  const cwd = process.cwd();
+  const dirSesi = folderSesi(configDir());
+
   console.log("VibeKit chat — ketik pertanyaan, /keluar untuk berhenti.");
   console.log("Chat ini juga bisa bertindak: minta saja dibuatkan file atau menjalankan perintah — setiap aksi meminta persetujuanmu dulu.");
-  console.log("Perintah /auto menyalakan/mematikan mode auto-allow (aksi tanpa persetujuan) di tengah sesi.");
+  console.log("Perintah /auto menyalakan/mematikan mode auto-allow (aksi tanpa persetujuan) di tengah sesi; /sesi menampilkan id sesi aktif.");
   if (autoAktif) cetakPeringatanAuto();
+
+  // Sesi: --lanjut memulihkan sesi terakhir yang tersimpan (riwayat internal
+  // apa adanya, termasuk pesan mentah tool agar thought_signature utuh);
+  // tanpa --lanjut, sesi baru dimulai. Sesi disimpan SETELAH setiap giliran
+  // berhasil — sesi yang belum pernah berhasil tidak meninggalkan file.
+  let sesiAktif: SesiChat;
+  const riwayat: ChatMessage[] = [];
+  if (lanjut) {
+    const tersimpan = muatSesiTerakhir(dirSesi);
+    if (tersimpan) {
+      sesiAktif = tersimpan;
+      riwayat.push(...tersimpan.pesan);
+      const jumlahIsi = tersimpan.pesan.filter((m) => m.role !== "system").length;
+      console.log(
+        `[vibekit] Sesi dilanjutkan: ${tersimpan.id} — ${jumlahIsi} pesan dipulihkan (terakhir diperbarui ${new Date(tersimpan.diperbarui).toLocaleString("id-ID")}).`
+      );
+    } else {
+      console.log("[vibekit] Belum ada sesi tersimpan — memulai sesi chat baru.");
+      sesiAktif = { id: buatIdSesi(), dibuat: new Date().toISOString(), diperbarui: new Date().toISOString(), pesan: [] };
+      riwayat.push({ role: "system", content: SYSTEM_PROMPT_GABUNGAN });
+    }
+  } else {
+    sesiAktif = { id: buatIdSesi(), dibuat: new Date().toISOString(), diperbarui: new Date().toISOString(), pesan: [] };
+    riwayat.push({ role: "system", content: SYSTEM_PROMPT_GABUNGAN });
+  }
+
+  // Brief proyek disuntikkan SEKALI di awal sesi (setelah system prompt),
+  // kecuali sudah ada di riwayat sesi yang dilanjutkan.
+  const briefSudahAda = riwayat.some(
+    (m) => typeof m.content === "string" && m.content.startsWith(AWALAN_KONTEKS_BRIEF)
+  );
+  if (!briefSudahAda) {
+    const konteksBrief = siapkanKonteksBrief(cwd, tanpaBrief);
+    if (konteksBrief) riwayat.splice(1, 0, { role: "system", content: konteksBrief });
+  }
+
   // Server MCP disambungkan SEKALI untuk seluruh sesi chat ini.
   const mcp = await siapkanMcp(config);
-  const riwayat: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT_GABUNGAN }];
   const pembaca = buatPembacaBaris();
   const konfirmasi = buatKonfirmasi(pembaca);
   try {
@@ -338,33 +444,71 @@ async function perintahChat(args: string[]): Promise<number> {
         );
         continue;
       }
+      if (baris === "/sesi") {
+        console.log(`[vibekit] Sesi aktif: ${sesiAktif.id} (tersimpan otomatis setelah setiap giliran berhasil; lanjutkan kapan pun dengan: vibekit chat --lanjut)`);
+        continue;
+      }
       riwayat.push({ role: "user", content: baris });
 
       // Kompaksi riwayat aksi DULU: rangkaian tool giliran-giliran lama
       // diganti ringkasan satu baris agar isi file tidak terkirim ulang.
       // Giliran terakhir (yang baru saja ditambahkan pesan user-nya ini
-      // menjadi giliran terakhir) tidak disentuh kompaksi.
-      const terkompaksi = kompaksiRiwayatAksi(riwayat);
-      riwayat.splice(0, riwayat.length, ...terkompaksi);
+      // menjadi giliran terakhir) tidak disentuh kompaksi. Token yang
+      // terbuang DIUKUR dan diakumulasikan ke state (laporan `vibekit hemat`).
+      const terkompaksi = kompaksiRiwayatAksiTerukur(riwayat);
+      riwayat.splice(0, riwayat.length, ...terkompaksi.riwayat);
+      if (terkompaksi.tokenTerbuang > 0) {
+        try {
+          catatHematKompaksi(statePath(), terkompaksi.tokenTerbuang);
+        } catch {
+          /* pencatatan hemat gagal tidak boleh menggagalkan giliran */
+        }
+      }
 
       // Lalu Pangkas SADAR-TOOL: hanya pada batas giliran utuh, tidak pernah
       // menyisakan pesan tool yatim atau tool_calls tanpa hasilnya.
       const terpotong = pangkasRiwayatAman(riwayat, BATAS_TOKEN_RIWAYAT);
       riwayat.splice(0, riwayat.length, ...terpotong);
 
+      // Jawaban dialirkan (streaming): header dicetak saat token pertama
+      // tiba dari penyedia pemenang (bukan sebelumnya, agar nama penyedia
+      // tidak salah saat failover), lalu potongan teks menyusul apa adanya.
+      let sudahMengalir = false;
       const hasil = await jalankanGiliran({
         config,
         messages: riwayat,
         lokasiState: statePath(),
-        cwd: process.cwd(),
+        cwd,
         konfirmasi,
         autoAllow: autoAktif,
         jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+        stream: true,
+        onTokenPertama: (provider: ProviderConfig) => {
+          // Header hanya dicetak SEKALI per giliran, pada token pertama dari
+          // panggilan router mana pun yang lebih dulu mengeluarkan teks.
+          if (sudahMengalir) return;
+          sudahMengalir = true;
+          process.stdout.write(`\nvibekit (${provider.nama})> `);
+        },
+        onToken: (potongan) => process.stdout.write(potongan),
         ...(mcp ? { toolEkstra: mcp.toolEkstra, eksekutorEkstra: mcp.eksekutorEkstra } : {}),
       });
       if (hasil.ok) {
-        console.log(`\nvibekit (${hasil.providerTerakhir?.nama ?? "?"})> ${hasil.jawabanAkhir}\n`);
+        if (sudahMengalir) {
+          process.stdout.write("\n\n");
+        } else {
+          console.log(`\nvibekit (${hasil.providerTerakhir?.nama ?? "?"})> ${hasil.jawabanAkhir}\n`);
+        }
+        // Simpan sesi SETELAH giliran berhasil (riwayat sudah terkompaksi).
+        sesiAktif.diperbarui = new Date().toISOString();
+        sesiAktif.pesan = [...riwayat];
+        try {
+          simpanSesi(dirSesi, sesiAktif);
+        } catch {
+          /* kegagalan menyimpan sesi tidak menggagalkan percakapan */
+        }
       } else {
+        if (sudahMengalir) process.stdout.write("\n");
         // Giliran gagal/batas tercapai: gulung balik SELURUH giliran ini
         // (pesan user + rangkaian parsialnya) agar riwayat tetap bersih.
         let idxUser = -1;
@@ -390,8 +534,11 @@ async function perintahChat(args: string[]): Promise<number> {
 
 async function perintahDo(args: string[]): Promise<number> {
   const auto = args.includes("--auto") || args.includes("--yes");
+  const rencana = args.includes("--rencana");
+  const tanpaBrief = args.includes("--tanpa-brief");
+  const FLAG_DO = new Set(["--auto", "--yes", "--rencana", "--tanpa-brief"]);
   const tugas = args
-    .filter((a) => a !== "--auto" && a !== "--yes")
+    .filter((a) => !FLAG_DO.has(a))
     .join(" ")
     .trim();
   if (!tugas) {
@@ -408,17 +555,68 @@ async function perintahDo(args: string[]): Promise<number> {
   const cwd = process.cwd();
   console.log(`VibeKit agent — folder kerja: ${cwd}`);
   console.log(`Tugas: ${tugas}`);
-  if (auto) {
+  if (rencana) {
+    console.log("Mode rencana: agent menyusun rencana dulu dan meminta persetujuanmu SATU kali sebelum menjalankan apa pun.\n");
+  } else if (auto) {
     cetakPeringatanAuto();
   } else {
     console.log("Tool baca berjalan langsung; tulis/edit file dan jalankan perintah meminta persetujuanmu satu per satu.\n");
   }
+  const konteksBrief = siapkanKonteksBrief(cwd, tanpaBrief);
 
   const mcp = await siapkanMcp(config);
   const pembaca = buatPembacaBaris();
   const konfirmasi = buatKonfirmasi(pembaca);
+  // Ringkasan akhir dialirkan (streaming) ke stdout; jejak tetap ke stderr.
+  let sudahMengalir = false;
+  const onToken = (potongan: string) => {
+    sudahMengalir = true;
+    process.stdout.write(potongan);
+  };
 
   try {
+    if (rencana) {
+      const hasil = await jalankanAgentRencana({
+        config,
+        tugas,
+        lokasiState: statePath(),
+        cwd,
+        konfirmasi,
+        konfirmasiRencana: async (teksRencana: string): Promise<boolean> => {
+          console.log("\n— rencana agent —");
+          console.log(teksRencana);
+          const jawaban = await pembaca.tanya("\nJalankan rencana ini? (y/N) ");
+          if (jawaban === null) return false; // EOF: tolak demi keamanan
+          const j = jawaban.trim().toLowerCase();
+          if (j !== "y" && j !== "ya") return false;
+          console.error(
+            "[vibekit] Rencana disetujui — eksekusi berjalan TANPA konfirmasi per langkah (mode auto-allow khusus rencana ini). Pagar folder kerja tetap berlaku."
+          );
+          return true;
+        },
+        jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+        stream: true,
+        onToken,
+        ...(konteksBrief ? { konteksSistem: konteksBrief } : {}),
+        ...(mcp ? { toolEkstra: mcp.toolEkstra, eksekutorEkstra: mcp.eksekutorEkstra } : {}),
+      });
+      for (const c of hasil.catatan) {
+        console.error(`[vibekit] dilewati ${c.nama}: ${c.alasan}`);
+      }
+      if (hasil.status === "dibatalkan") {
+        console.log("\nDibatalkan — rencana tidak dijalankan, tidak ada perubahan apa pun.");
+        return 0;
+      }
+      if (sudahMengalir) {
+        process.stdout.write("\n");
+        if (hasil.status !== "selesai") console.error(`[vibekit] ${hasil.ringkasan}`);
+      } else {
+        console.log(`\n— ringkasan agent (${hasil.jumlahLangkah} langkah) —`);
+        console.log(hasil.ringkasan);
+      }
+      return hasil.status === "selesai" ? 0 : 1;
+    }
+
     const hasil = await jalankanAgent({
       config,
       tugas,
@@ -427,13 +625,21 @@ async function perintahDo(args: string[]): Promise<number> {
       konfirmasi,
       autoAllow: auto,
       jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+      stream: true,
+      onToken,
+      ...(konteksBrief ? { konteksSistem: konteksBrief } : {}),
       ...(mcp ? { toolEkstra: mcp.toolEkstra, eksekutorEkstra: mcp.eksekutorEkstra } : {}),
     });
     for (const c of hasil.catatan) {
       console.error(`[vibekit] dilewati ${c.nama}: ${c.alasan}`);
     }
-    console.log(`\n— ringkasan agent (${hasil.jumlahLangkah} langkah) —`);
-    console.log(hasil.ringkasan);
+    if (sudahMengalir) {
+      process.stdout.write("\n");
+      if (!hasil.ok) console.error(`[vibekit] ${hasil.ringkasan}`);
+    } else {
+      console.log(`\n— ringkasan agent (${hasil.jumlahLangkah} langkah) —`);
+      console.log(hasil.ringkasan);
+    }
     return hasil.ok ? 0 : 1;
   } finally {
     pembaca.tutup();
@@ -498,6 +704,39 @@ async function perintahMcp(): Promise<number> {
   }
 }
 
+/** `vibekit hemat`: laporan pemakaian token + penghematan terukur dari state lokal. */
+function perintahHemat(): number {
+  const state = muatState(statePath());
+  console.log(bangunLaporanHemat(state, new Date()));
+  return 0;
+}
+
+/** `vibekit sesi`: daftar sesi chat tersimpan, terbaru lebih dulu. */
+function perintahSesi(): number {
+  const daftar = daftarSesi(folderSesi(configDir()));
+  if (daftar.length === 0) {
+    console.log("Belum ada sesi chat tersimpan. Sesi tersimpan otomatis setelah giliran chat pertama yang berhasil.");
+    console.log("Lanjutkan sesi terakhir kapan pun dengan: vibekit chat --lanjut");
+    return 0;
+  }
+  console.log(`Sesi chat tersimpan (${daftar.length}):`);
+  for (const s of daftar) {
+    const waktu = new Date(s.diperbarui).toLocaleString("id-ID");
+    console.log(`  ${s.id} • ${waktu} • ${s.jumlahPesan} pesan${s.cuplikan ? ` • "${s.cuplikan}"` : ""}`);
+  }
+  console.log("\nLanjutkan sesi terakhir dengan: vibekit chat --lanjut");
+  return 0;
+}
+
+/** `vibekit brief`: pindai folder kerja saat ini dan tulis .vibekit/brief.md. */
+function perintahBrief(): number {
+  const hasil = buatBrief(process.cwd());
+  console.log(`Brief proyek ditulis: ${hasil.lokasi}`);
+  console.log(`Isi: ${hasil.jumlahFile} file terpindai • ±${formatAngka(hasil.token)} token.`);
+  console.log("Brief ini dipakai otomatis sebagai konteks pada ask/chat/do berikutnya (lewatkan dengan --tanpa-brief).");
+  return 0;
+}
+
 function perintahStatus(): number {
   let config: VibekitConfig;
   try {
@@ -539,6 +778,12 @@ async function utama(): Promise<number> {
       return perintahDo(sisa);
     case "mcp":
       return perintahMcp();
+    case "brief":
+      return perintahBrief();
+    case "hemat":
+      return perintahHemat();
+    case "sesi":
+      return perintahSesi();
     case "status":
       return perintahStatus();
     case "--version":
