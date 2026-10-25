@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+
+# Konfigurasi & state lokal bisa berisi API key — jangan pernah ter-commit
+/vibekit.config.json
+.vibekit/
