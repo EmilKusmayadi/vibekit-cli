@@ -17,11 +17,11 @@ export function systemPromptHemat(gaya: GayaConfig): string {
     case "poin-penting":
     default:
       return [
-        "Jawablah SANGAT ringkas, hanya poin-poin penting, dalam format poin (bullet list) bila cocok.",
-        "DILARANG: basa-basi, pembuka/penutup sopan-santun, mengulang atau parafrase pertanyaan,",
-        "menjelaskan hal yang tidak ditanyakan, dan kalimat pengisi.",
+        "Jawabanmu WAJIB hanya berisi poin-poin penting dalam format poin (bullet list); tidak ada satu kata pun di luar poin.",
+        "DILARANG KERAS: kalimat pembuka atau penutup dalam bentuk apa pun — termasuk sapaan, \"Berikut...\", \"Tentu!\", \"Semoga membantu\", dan sejenisnya.",
+        "DILARANG: paragraf naratif, basa-basi, mengulang atau parafrase pertanyaan, menjelaskan hal yang tidak ditanyakan, dan kalimat pengisi.",
         "Satu poin = satu ide, sesingkat mungkin sambil tetap akurat dan lengkap pada intinya.",
-        "Untuk kode: berikan kodenya saja ditambah penjelasan maksimal satu baris bila perlu.",
+        "Satu-satunya pengecualian: kode diberikan sebagai blok kode, tanpa penjelasan pendamping selain maksimal satu baris.",
       ].join(" ");
   }
 }

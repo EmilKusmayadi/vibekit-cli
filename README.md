@@ -47,6 +47,19 @@ Isi `apiKey` tiap penyedia (atau gunakan sintaks `"env:NAMA_VAR"` untuk membaca 
 
 Konfigurasi per proyek: file `./vibekit.config.json` di folder proyek **menimpa** konfigurasi global, jadi tiap proyek bisa punya susunan penyedia sendiri.
 
+### Mengatur Plafon Jawaban (`gaya.maksTokenJawaban`)
+
+`maksTokenJawaban` adalah **plafon** panjang satu respons model (dikirim sebagai `max_tokens`), bukan target: panjang jawaban sebenarnya diatur oleh `gaya.jawaban`, jadi plafon besar tidak otomatis boros. Plafon hanya berfungsi sebagai rem pengaman — tanpa batas sama sekali, tidak ada yang menghentikan model yang bertele-tele (atau menulis file tanpa henti) selain batas bawaan model itu sendiri.
+
+| Nilai | Cocok untuk |
+|---|---|
+| `800` (bawaan template) | Tanya-jawab ringan, pertanyaan singkat |
+| `4000` | Kerja agent dan file berukuran sedang |
+| `8000`–`16000` | Membangun aplikasi, menghasilkan file besar |
+| `0` (atau hapus field-nya) | **Tanpa batas** — `max_tokens` tidak dikirim sama sekali; batas bawaan model yang berlaku |
+
+Penting untuk mode agent: isi file yang ditulis model lewat tool `tulis_file`/`edit_file` **ikut dihitung dalam plafon respons yang sama**. File yang lebih besar dari plafon akan terpotong di tengah dan gagal ditulis — bila Anda menyuruh agent membangun aplikasi atau file besar, naikkan plafonnya (atau set `0`).
+
 Lalu:
 
 ```bash
@@ -100,7 +113,7 @@ Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yan
 ## Cara Failover Bekerja
 
 1. Sebelum memanggil, router memeriksa state lokal (`~/.vibekit/state.json`): penyedia yang masih **cooldown** atau sudah mencapai **anggaran harian** dilewati tanpa dipanggil.
-2. Saat memanggil, permintaan berisi system prompt hemat sesuai `gaya.jawaban` dan `max_tokens` = `gaya.maksTokenJawaban`. Objek `extraBody` per penyedia (bila ada) digabung ke body — berguna untuk kenop khas model, mis. menekan penalaran.
+2. Saat memanggil, permintaan berisi system prompt hemat sesuai `gaya.jawaban` dan `max_tokens` = `gaya.maksTokenJawaban` (hanya bila diatur > 0; nilai `0` atau field yang dihapus berarti `max_tokens` tidak dikirim sama sekali — tanpa batas). Objek `extraBody` per penyedia (bila ada) digabung ke body — berguna untuk kenop khas model, mis. menekan penalaran.
 3. Bila respons menandakan kuota habis — HTTP **429/402** atau pola error `insufficient_quota` / `RESOURCE_EXHAUSTED` / saldo — penyedia ditandai **cooldown sampai akhir hari lokal** dan permintaan yang sama diulangi ke penyedia berikutnya. Rate-limit singkat (429 tanpa pola kuota) → cooldown `jedaCooldownMenit` (bawaan 15 menit). Khusus HTTP 503 (server penyedia sedang sibuk/penuh sesaat), penyedia yang sama dicoba ulang dulu sampai 2 kali dengan jeda 3 dan 8 detik, dan 503 tidak memicu cooldown.
 4. Error lain (401 kunci salah, 400, jaringan) **tidak** dianggap kuota habis: dicatat apa adanya dan router tetap mencoba penyedia berikutnya.
 5. Token terpakai dicatat dari field `usage` respons (atau estimasi tokenizer bila tidak ada). Bila semua penyedia gagal/habis, Anda menerima ringkasan status tiap penyedia dan jam paling awal untuk mencoba lagi.
@@ -108,10 +121,40 @@ Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yan
 ## Penghematan Token
 
 - **System prompt ringkas** — gaya `poin-penting` memerintahkan model menjawab hanya poin penting tanpa basa-basi; tersedia juga `normal` dan `detail`.
-- **Batas jawaban keras** — `maksTokenJawaban` menjadi `max_tokens` di setiap permintaan.
+- **Plafon jawaban** — `maksTokenJawaban` menjadi `max_tokens` di setiap permintaan bila diatur > 0; `0` (atau field dihapus) berarti tanpa batas. Ini plafon, bukan target — lihat tabel anjuran di bagian Mulai Cepat.
 - **Konteks terseleksi** — `--file/--dir` melewati file biner & file > 256 KB, memangkas baris komentar penuh dan baris kosong berlebih, dan membatasi total konteks (±16.000 token) dengan memotong berkas terbesar. Selisih token mentah vs terseleksi selalu ditampilkan.
 - **Kompaksi riwayat aksi (chat)** — rangkaian tool giliran-giliran lama dipadatkan menjadi ringkasan satu baris (`[Aksi selesai: tulis_file index.html — OK]`) sebelum giliran baru dimulai, jadi isi file yang pernah ditulis/dibaca model tidak dikirim ulang ke API di setiap giliran. Giliran terakhir tidak pernah disentuh kompaksi, sehingga `thought_signature` Gemini tetap utuh selama dibutuhkan.
 - **Anggaran & pencatatan** — pemakaian per penyedia per hari terlihat di `vibekit status`, sehingga boros selalu kelihatan.
+
+## Pemecahan Masalah
+
+### Windows PowerShell: `vibekit : The term 'vibekit' is not recognized as the name of a cmdlet...`
+
+Setelah `npm install -g @chispear/vibekit` berhasil, menjalankan `vibekit init` (atau perintah `vibekit` lain) di PowerShell bisa gagal dengan error `CommandNotFoundException`:
+
+```
+vibekit : The term 'vibekit' is not recognized as the name of a cmdlet, function, script file, or operable program.
+```
+
+**Penyebab:** folder tempat npm menyimpan perintah global — hasil `npm config get prefix`, umumnya `C:\Users\<nama>\AppData\Roaming\npm` — belum ada di PATH Windows, jadi PowerShell tidak menemukan perintahnya. Package-nya sendiri sebenarnya sudah terpasang dengan benar; ini murni soal PATH.
+
+**Perbaikan cepat** (hanya untuk jendela PowerShell yang sedang terbuka):
+
+```powershell
+$env:Path += ";" + (npm config get prefix)
+```
+
+**Perbaikan permanen** (sekali saja, lalu tutup dan buka lagi PowerShell):
+
+```powershell
+$prefix = npm config get prefix
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", "$userPath;$prefix", "User")
+```
+
+**Verifikasi:** `vibekit --version` harus menampilkan nomor versi (mis. `0.4.1`).
+
+**Alternatif tanpa mengubah PATH:** jalankan lewat npx — `npx @chispear/vibekit <perintah>` (mis. `npx @chispear/vibekit init`).
 
 ## Pengembangan
 

@@ -18,8 +18,11 @@ export interface ProviderConfig {
 export interface GayaConfig {
   /** "poin-penting" (bawaan) | "normal" | "detail" */
   jawaban: string;
-  /** Batas token jawaban (max_tokens). */
-  maksTokenJawaban: number;
+  /**
+   * Plafon token jawaban (dikirim sebagai max_tokens). Opsional:
+   * 0, null, atau tidak diisi = TANPA BATAS (field max_tokens tidak dikirim sama sekali).
+   */
+  maksTokenJawaban?: number;
 }
 
 export interface VibekitConfig {

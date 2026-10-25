@@ -105,7 +105,9 @@ export function muatConfig(cwd: string = process.cwd()): { config: VibekitConfig
     providers: obj.providers.map((p) => normalisasiProvider(p as ProviderConfig)),
     gaya: {
       jawaban: obj.gaya?.jawaban ?? "poin-penting",
-      maksTokenJawaban: typeof obj.gaya?.maksTokenJawaban === "number" ? obj.gaya.maksTokenJawaban : 800,
+      // Angka dipertahankan apa adanya (termasuk 0 = tanpa batas); tidak diisi/null
+      // dibiarkan undefined agar router tidak mengirim max_tokens sama sekali.
+      maksTokenJawaban: typeof obj.gaya?.maksTokenJawaban === "number" ? obj.gaya.maksTokenJawaban : undefined,
     },
   };
   return { config, sumber };

@@ -143,10 +143,13 @@ export async function tanyaRouter(opsi: OpsiTanya): Promise<HasilTanya> {
     }
 
     const url = provider.baseUrl.replace(/\/+$/, "") + "/chat/completions";
+    // max_tokens hanya dikirim bila plafon diatur > 0. Nilai 0/kosong/tidak diisi
+    // = tanpa batas: field tidak dikirim sama sekali, batas bawaan model berlaku.
+    const maksToken = opsi.config.gaya.maksTokenJawaban;
     const body: Record<string, unknown> = {
       model: provider.model,
       messages: semuaPesan,
-      max_tokens: opsi.config.gaya.maksTokenJawaban,
+      ...(typeof maksToken === "number" && maksToken > 0 ? { max_tokens: maksToken } : {}),
       ...(opsi.tools && opsi.tools.length > 0 ? { tools: opsi.tools } : {}),
       ...(provider.extraBody ?? {}),
     };

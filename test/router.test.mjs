@@ -7,6 +7,7 @@ import { after, before, test } from "node:test";
 
 import { tanyaRouter } from "../dist/router.js";
 import { muatState, statePenyedia, tanggalLokal } from "../dist/state.js";
+import { systemPromptHemat } from "../dist/prompt.js";
 
 const serverBerjalan = [];
 
@@ -277,4 +278,29 @@ test("(g2) HTTP 503 terus-menerus → menyerah setelah 3 panggilan, tanpa cooldo
   assert.equal(penuh.panggilan.length, 3, "penyedia 503 dicoba 1x + 2 retry lalu dilewati");
   const state = muatState(lokasiState);
   assert.equal(statePenyedia(state, "penuh").cooldownUntil, null, "503 tidak boleh memicu cooldown");
+});
+
+test("(r) maksTokenJawaban 0 = tanpa batas: body TIDAK memiliki field max_tokens sama sekali", async () => {
+  const perekam = await mulaiServer((req, res) => balasChat(res, "jawaban tanpa plafon", 55));
+  const { lokasiState } = buatSementara();
+
+  const hasil = await tanyaRouter({
+    config: { providers: [penyedia("perekam", perekam.alamat)], gaya: { jawaban: "poin-penting", maksTokenJawaban: 0 } },
+    messages: PESAN,
+    lokasiState,
+  });
+
+  assert.equal(hasil.ok, true);
+  assert.equal(hasil.jawaban, "jawaban tanpa plafon");
+  const body = JSON.parse(perekam.panggilan[0].body);
+  assert.ok(!("max_tokens" in body), "max_tokens tidak boleh ada di body bila maksTokenJawaban 0");
+  assert.equal(body.model, "model-perekam");
+});
+
+test("(s) gaya poin-penting yang diperketat: wajib bentuk poin, dilarang kalimat pembuka/penutup", () => {
+  const prompt = systemPromptHemat({ jawaban: "poin-penting", maksTokenJawaban: 800 });
+  assert.match(prompt, /poin-poin penting/i);
+  assert.match(prompt, /WAJIB|hanya poin/i);
+  assert.match(prompt, /pembuka/i);
+  assert.match(prompt, /blok kode/i);
 });
