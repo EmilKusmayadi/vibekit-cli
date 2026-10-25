@@ -61,21 +61,25 @@ vibekit status
 | Perintah | Fungsi |
 |---|---|
 | `vibekit init` | Buat `~/.vibekit/config.json` dari template (tidak menimpa yang sudah ada) |
-| `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]...` | Tanya sekali; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
-| `vibekit chat` | Percakapan interaktif; riwayat dipangkas otomatis (maks ±4.000 token, giliran tertua dibuang); `/keluar` untuk berhenti |
-| `vibekit do "<tugas>"` | Mode agent: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah) |
+| `vibekit ask "<pertanyaan>" [--file <path>]... [--dir <path>]...` | Satu pertanyaan yang boleh berakhir dengan aksi; lampirkan file/folder sebagai konteks terseleksi. Ringkasan hemat token ditulis ke stderr, jawaban bersih di stdout, ditutup baris info model + token terpakai |
+| `vibekit chat` | Percakapan interaktif yang juga bisa bertindak di tengah obrolan; riwayat dipangkas otomatis dan sadar-tool (maks ±4.000 token, hanya pada batas giliran utuh); `/keluar` untuk berhenti |
+| `vibekit do "<tugas>"` | Mode agent sekali jalan: model mengerjakan tugas nyata dengan tool file/perintah di folder saat ini (lihat bagian Mode Agent di bawah) |
 | `vibekit status` | Tabel per penyedia: model, status (aktif / cooldown s.d. jam / anggaran tercapai), token terpakai hari ini |
 | `vibekit --help` / `--version` | Bantuan / versi |
 
-## Mode Agent — `vibekit do`
+## Mode Agent — `ask`, `chat`, dan `do`
 
-Selain menjawab pertanyaan, VibeKit bisa **mengerjakan tugas** di folder proyek Anda:
+Selain menjawab pertanyaan, VibeKit bisa **bertindak** di folder proyek Anda. Sejak v0.3.0 kemampuan agent ini menyatu ke semua perintah — pertanyaan biasa dijawab teks seperti biasa, sedangkan permintaan membuat file atau menjalankan perintah dikerjakan lewat tool dengan pagar keamanan yang sama:
+
+- **`vibekit ask`** — satu pertanyaan yang boleh berakhir dengan aksi: `vibekit ask "buatkan file halo.txt berisi sapaan"`.
+- **`vibekit chat`** — ngobrol yang bisa bertindak di tengah percakapan: minta dibuatkan file di giliran mana pun, model memakai tool lalu melanjutkan obrolan dengan riwayat yang utuh (termasuk rangkaian tool-nya).
+- **`vibekit do`** — mode tugas sekali jalan: jejak langkah dicetak, ditutup ringkasan akhir, dan kode keluar mencerminkan berhasil/tidaknya tugas:
 
 ```bash
 vibekit do "buatkan file halo.txt berisi sapaan, lalu tampilkan daftar file di sini"
 ```
 
-Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yang sama, failover router yang sama), sampai ia membalas ringkasan akhir. Ada **5 tool**:
+Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yang sama, failover router yang sama), sampai ia membalas teks akhir. Ada **5 tool**:
 
 | Tool | Fungsi | Konfirmasi? |
 |---|---|---|
@@ -89,7 +93,8 @@ Model bekerja langkah demi langkah lewat tool calling (API OpenAI-compatible yan
 
 - **Hanya folder kerja (cwd).** Semua path di-resolve terhadap folder tempat perintah dijalankan; path yang keluar dari folder itu (mis. `../`) ditolak eksekutor, bahkan bila pengguna menyetujui.
 - **Konfirmasi per aksi.** Setiap aksi yang mengubah file atau menjalankan perintah menampilkan deskripsi aksinya (path + pratinjau konten untuk tulis, potongan teks lama→baru untuk edit, perintah lengkap untuk shell) dan hanya berjalan bila Anda menjawab `y`/`ya` — selain itu dianggap menolak, dan penolakan itu dilaporkan ke model agar ia menyesuaikan rencana.
-- **Batas 12 langkah** per tugas, dan hasil tiap tool dipangkas (±4.000 karakter) sebelum dikirim balik ke model demi hemat token.
+- **Batas 12 langkah** per giliran/tugas, dan hasil tiap tool dipangkas (±4.000 karakter) sebelum dikirim balik ke model demi hemat token.
+- **Riwayat chat yang aman untuk tool.** Pemangkasan riwayat chat hanya terjadi pada batas giliran utuh (satu pesan pengguna + seluruh rangkaian tool-nya), sehingga tidak pernah ada pesan hasil tool yang yatim atau panggilan tool yang kehilangan hasilnya.
 
 ## Cara Failover Bekerja
 
@@ -118,7 +123,7 @@ Keputusan repo: `dist/` masuk `.gitignore` dan dibangun saat publish (`prepublis
 
 ## Status Nama di npm
 
-Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
+Package ini terbit di npm sebagai **`@chispear/vibekit`** (v0.1.0, 25 Oktober 2026; v0.2.0 menambahkan mode agent `vibekit do`; v0.3.0 menggabungkan kemampuan agent itu ke `ask` dan `chat`) karena nama tak-scoped `vibekit` sudah dipakai proyek lain. Nama perintah CLI tetap `vibekit`.
 
 ## Lisensi
 

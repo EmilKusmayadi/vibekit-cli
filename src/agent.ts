@@ -2,7 +2,8 @@ import { exec } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { tanyaRouter, type CatatanPenyedia } from "./router.js";
-import type { ChatMessage, ToolCall, ToolDefinition, VibekitConfig } from "./types.js";
+import { hitungToken } from "./token.js";
+import type { ChatMessage, ProviderConfig, ToolCall, ToolDefinition, VibekitConfig } from "./types.js";
 
 /** Callback konfirmasi pengguna: true = aksi boleh dijalankan. */
 export type Konfirmasi = (deskripsi: string) => Promise<boolean>;
@@ -109,6 +110,21 @@ const SYSTEM_PROMPT_AGENT = [
   "Aksi tulis_file, edit_file, dan jalankan_perintah selalu meminta persetujuan pengguna dulu; bila pengguna menolak, jangan memaksa dan jangan mengulang aksi yang sama — sesuaikan rencana atau akhiri tugas.",
   "Jangan mengarang isi file: gunakan daftar_file/baca_file dulu bila perlu mengetahui isi folder/file.",
   "Bila tugas selesai (atau tidak bisa dilanjutkan), balas TANPA memanggil tool, berisi ringkasan akhir yang singkat dalam poin-poin penting: apa yang dilakukan dan hasilnya.",
+].join(" ");
+
+/**
+ * System prompt gabungan untuk `ask` dan `chat` (sejak v0.3.0): model adalah
+ * lawan bicara yang menjawab pertanyaan biasa langsung sebagai teks, tetapi
+ * juga bisa bertindak memakai tool yang sama seperti mode agent bila diminta.
+ */
+export const SYSTEM_PROMPT_GABUNGAN = [
+  "Kamu adalah lawan bicara VibeKit yang bekerja di dalam SATU folder kerja pengguna.",
+  "Jawab pertanyaan biasa langsung sebagai teks, singkat dan hanya poin-poin penting.",
+  "Bila pengguna meminta dibuatkan/diubah file atau menjalankan perintah, gunakan tool yang tersedia: daftar_file, baca_file, tulis_file, edit_file, jalankan_perintah.",
+  "Semua path bersifat relatif terhadap folder kerja; jangan pernah mencoba mengakses apa pun di luar folder itu.",
+  "Aksi tulis_file, edit_file, dan jalankan_perintah selalu meminta persetujuan pengguna dulu; bila pengguna menolak, jangan memaksa dan jangan mengulang aksi yang sama.",
+  "Jangan mengarang isi file: gunakan daftar_file/baca_file dulu bila perlu mengetahui isi folder/file.",
+  "Setelah bertindak, tutup giliran dengan balasan teks (tanpa tool) berisi ringkasan singkat: apa yang dilakukan dan hasilnya.",
 ].join(" ");
 
 /**
@@ -274,40 +290,64 @@ export async function eksekusiTool(panggilan: ToolCall, konteks: KonteksEksekusi
   }
 }
 
-export interface OpsiAgent {
+export interface OpsiGiliran {
   config: VibekitConfig;
-  /** Tugas dalam bahasa alami dari pengguna. */
-  tugas: string;
+  /**
+   * Riwayat pesan yang DIMUTASI di tempat: pemanggil sudah memasukkan pesan
+   * user terbaru (dan system prompt pilihannya, bila ada). Fungsi ini
+   * menambahkan pesan assistant mentah (bila ada tool_calls), pesan-pesan
+   * hasil tool, dan pesan assistant teks akhir ke array yang sama — sehingga
+   * riwayat chat tetap utuh antar giliran.
+   */
+  messages: ChatMessage[];
   lokasiState: string;
   /** Folder kerja: satu-satunya wilayah yang boleh disentuh tool. */
   cwd: string;
   konfirmasi: Konfirmasi;
   fetchImpl?: typeof fetch;
-  /** Batas jumlah panggilan model (bawaan 12). */
+  /** Batas jumlah panggilan model dalam satu giliran (bawaan 12). */
   maksLangkah?: number;
   /** Callback jejak langkah (untuk dicetak CLI secara langsung). */
   jejak?: (pesan: string) => void;
 }
 
-export interface HasilAgent {
+export interface HasilGiliran {
   ok: boolean;
-  ringkasan: string;
+  /** Teks akhir model bila ok; "" bila gagal. */
+  jawabanAkhir: string;
+  /** Penyedia dari panggilan router terakhir yang sukses (null bila belum ada yang sukses). */
+  providerTerakhir: ProviderConfig | null;
+  /** Total token semua panggilan router dalam giliran ini. */
+  totalToken: number;
+  /** "usage" bila SEMUA panggilan yang sukses melaporkan usage API; selain itu "estimasi". */
+  tokenSumber: "usage" | "estimasi";
   jumlahLangkah: number;
   catatan: CatatanPenyedia[];
+  /** Diisi bila ok=false karena router gagal total: pesan kegagalan dari router. */
+  pesanGagal?: string;
+  /** true bila loop berhenti karena batas langkah tercapai (bukan jawaban akhir, bukan gagal router). */
+  batasTercapai?: boolean;
 }
 
 /**
- * Loop mode agent: panggil router (dengan tools) → jalankan tool_calls yang
- * diminta model lewat eksekutor aman → kirim hasil tool balik → ulangi sampai
- * model membalas teks tanpa tool_calls (ringkasan akhir) atau langkah habis.
+ * Inti loop agent untuk SATU giliran: panggil router (dengan tools) → jalankan
+ * tool_calls yang diminta model lewat eksekutor aman → kirim hasil tool balik
+ * → ulangi sampai model membalas teks tanpa tool_calls atau langkah habis.
+ * Dipakai bersama oleh `do` (lewat jalankanAgent), `ask`, dan `chat`.
+ *
+ * Catatan kegagalan: bila router gagal di tengah giliran, `messages` mungkin
+ * sudah memuat rangkaian parsial (assistant tool_calls + hasil tool tanpa teks
+ * akhir). Pemanggil yang menyimpan riwayat (chat) sebaiknya menggulung balik
+ * giliran itu; pemanggil sekali jalan (ask/do) bisa mengabaikannya.
  */
-export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
+export async function jalankanGiliran(opsi: OpsiGiliran): Promise<HasilGiliran> {
   const maksLangkah = opsi.maksLangkah ?? MAKS_LANGKAH_BAWAAN;
+  const messages = opsi.messages;
   const catatan: CatatanPenyedia[] = [];
-  const messages: ChatMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT_AGENT },
-    { role: "user", content: opsi.tugas },
-  ];
+  let totalToken = 0;
+  let semuaUsage = true;
+  let providerTerakhir: ProviderConfig | null = null;
+  const sumber = (): "usage" | "estimasi" => (semuaUsage ? "usage" : "estimasi");
 
   let langkah = 0;
   while (langkah < maksLangkah) {
@@ -322,13 +362,35 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
     catatan.push(...hasil.catatan);
 
     if (!hasil.ok) {
-      return { ok: false, ringkasan: hasil.pesan, jumlahLangkah: langkah, catatan };
+      return {
+        ok: false,
+        jawabanAkhir: "",
+        providerTerakhir,
+        totalToken,
+        tokenSumber: sumber(),
+        jumlahLangkah: langkah,
+        catatan,
+        pesanGagal: hasil.pesan,
+      };
     }
+
+    totalToken += hasil.tokenTerpakai;
+    if (hasil.tokenSumber !== "usage") semuaUsage = false;
+    providerTerakhir = hasil.provider;
 
     const panggilan = hasil.toolCalls ?? [];
     if (panggilan.length === 0) {
-      // Balasan teks murni = ringkasan akhir dari model.
-      return { ok: true, ringkasan: hasil.jawaban, jumlahLangkah: langkah, catatan };
+      // Balasan teks murni = jawaban akhir giliran; simpan ke riwayat agar utuh.
+      messages.push({ role: "assistant", content: hasil.jawaban });
+      return {
+        ok: true,
+        jawabanAkhir: hasil.jawaban,
+        providerTerakhir,
+        totalToken,
+        tokenSumber: sumber(),
+        jumlahLangkah: langkah,
+        catatan,
+      };
     }
 
     if (hasil.pesanMentah && typeof hasil.pesanMentah === "object") {
@@ -366,10 +428,114 @@ export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
 
   return {
     ok: false,
-    ringkasan:
-      `Batas langkah tercapai (${maksLangkah} langkah) sebelum tugas selesai. ` +
-      "Jalankan lagi perintah yang sama untuk melanjutkan, atau persempit tugasnya.",
+    jawabanAkhir: "",
+    providerTerakhir,
+    totalToken,
+    tokenSumber: sumber(),
     jumlahLangkah: langkah,
     catatan,
+    batasTercapai: true,
   };
+}
+
+/** Perkiraan token satu pesan: konten teks ditambah argumen tool_calls (bila ada). */
+function tokenPesan(m: ChatMessage): number {
+  let teks = m.content ?? "";
+  if (m.tool_calls && m.tool_calls.length > 0) teks += "\n" + JSON.stringify(m.tool_calls);
+  return hitungToken(teks);
+}
+
+/**
+ * Pangkas riwayat percakapan secara SADAR-TOOL: pemotongan hanya terjadi pada
+ * batas giliran utuh. Satu giliran = satu pesan "user" beserta seluruh
+ * rangkaian sesudahnya sampai sebelum "user" berikutnya (assistant tool_calls,
+ * hasil-hasil tool, assistant teks akhir). Fungsi ini TIDAK PERNAH menyisakan
+ * pesan "tool" yatim atau assistant tool_calls tanpa hasil tool-nya.
+ *
+ * Awalan pesan "system" (bila ada) selalu dipertahankan karena bukan bagian
+ * giliran mana pun. Giliran terakhir selalu dipertahankan utuh, jadi hasil
+ * boleh tetap melebihi maksToken bila satu giliran terakhir saja sudah
+ * sebesar itu. Tidak mengubah array masukan; mengembalikan array baru.
+ */
+export function pangkasRiwayatAman(messages: ChatMessage[], maksToken: number): ChatMessage[] {
+  let awal = 0;
+  while (awal < messages.length && messages[awal].role === "system") awal++;
+  const awalan = messages.slice(0, awal);
+  const sisa = messages.slice(awal);
+
+  // Kelompokkan sisa menjadi giliran-giliran: grup baru dimulai di setiap
+  // pesan "user"; pesan sebelum "user" pertama membentuk grupnya sendiri.
+  const grup: ChatMessage[][] = [];
+  for (const m of sisa) {
+    if (m.role === "user" || grup.length === 0) grup.push([m]);
+    else grup[grup.length - 1].push(m);
+  }
+
+  const tokenGrup = (g: ChatMessage[]): number => g.reduce((s, m) => s + tokenPesan(m), 0);
+  let total =
+    awalan.reduce((s, m) => s + tokenPesan(m), 0) + grup.reduce((s, g) => s + tokenGrup(g), 0);
+  // Buang giliran tertua secara utuh sampai muat; giliran terakhir tak dibuang.
+  while (total > maksToken && grup.length > 1) {
+    total -= tokenGrup(grup.shift() as ChatMessage[]);
+  }
+  return [...awalan, ...grup.flat()];
+}
+
+export interface OpsiAgent {
+  config: VibekitConfig;
+  /** Tugas dalam bahasa alami dari pengguna. */
+  tugas: string;
+  lokasiState: string;
+  /** Folder kerja: satu-satunya wilayah yang boleh disentuh tool. */
+  cwd: string;
+  konfirmasi: Konfirmasi;
+  fetchImpl?: typeof fetch;
+  /** Batas jumlah panggilan model (bawaan 12). */
+  maksLangkah?: number;
+  /** Callback jejak langkah (untuk dicetak CLI secara langsung). */
+  jejak?: (pesan: string) => void;
+}
+
+export interface HasilAgent {
+  ok: boolean;
+  ringkasan: string;
+  jumlahLangkah: number;
+  catatan: CatatanPenyedia[];
+}
+
+/**
+ * Mode tugas sekali jalan (`vibekit do`): satu giliran agent dengan system
+ * prompt pelaksana tugas, dibangun di atas jalankanGiliran. Perilaku dan
+ * bentuk HasilAgent sama seperti sebelum refaktor v0.3.0.
+ */
+export async function jalankanAgent(opsi: OpsiAgent): Promise<HasilAgent> {
+  const maksLangkah = opsi.maksLangkah ?? MAKS_LANGKAH_BAWAAN;
+  const messages: ChatMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT_AGENT },
+    { role: "user", content: opsi.tugas },
+  ];
+  const hasil = await jalankanGiliran({
+    config: opsi.config,
+    messages,
+    lokasiState: opsi.lokasiState,
+    cwd: opsi.cwd,
+    konfirmasi: opsi.konfirmasi,
+    fetchImpl: opsi.fetchImpl,
+    maksLangkah: opsi.maksLangkah,
+    jejak: opsi.jejak,
+  });
+  if (hasil.pesanGagal !== undefined) {
+    return { ok: false, ringkasan: hasil.pesanGagal, jumlahLangkah: hasil.jumlahLangkah, catatan: hasil.catatan };
+  }
+  if (hasil.batasTercapai) {
+    return {
+      ok: false,
+      ringkasan:
+        `Batas langkah tercapai (${maksLangkah} langkah) sebelum tugas selesai. ` +
+        "Jalankan lagi perintah yang sama untuk melanjutkan, atau persempit tugasnya.",
+      jumlahLangkah: hasil.jumlahLangkah,
+      catatan: hasil.catatan,
+    };
+  }
+  return { ok: true, ringkasan: hasil.jawabanAkhir, jumlahLangkah: hasil.jumlahLangkah, catatan: hasil.catatan };
 }

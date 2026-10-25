@@ -6,19 +6,24 @@ import {
   muatConfig,
   statePath,
 } from "./config.js";
-import { jalankanAgent } from "./agent.js";
+import {
+  jalankanAgent,
+  jalankanGiliran,
+  pangkasRiwayatAman,
+  SYSTEM_PROMPT_GABUNGAN,
+  type Konfirmasi,
+} from "./agent.js";
 import { bangunKonteks } from "./context.js";
-import { tanyaRouter, type HasilTanya } from "./router.js";
 import {
   formatJam,
   muatState,
   sedangCooldown,
   statePenyedia,
 } from "./state.js";
-import { formatAngka, hitungToken } from "./token.js";
+import { formatAngka } from "./token.js";
 import type { ChatMessage, VibekitConfig } from "./types.js";
 
-const VERSI = "0.2.1";
+const VERSI = "0.3.0";
 const BATAS_TOKEN_RIWAYAT = 4000;
 
 function bantuan(): void {
@@ -26,9 +31,9 @@ function bantuan(): void {
 
 Penggunaan:
   vibekit init                          Buat ~/.vibekit/config.json dari template
-  vibekit ask "<pertanyaan>" [opsi]     Tanya sekali lewat router
-  vibekit chat                          Percakapan interaktif (perintah /keluar untuk berhenti)
-  vibekit do "<tugas>"                  Mode agent: kerjakan tugas dengan tool file/perintah di folder ini
+  vibekit ask "<pertanyaan>" [opsi]     Tanya sekali (bisa bertindak: membuat file & menjalankan perintah dengan persetujuanmu)
+  vibekit chat                          Percakapan interaktif yang juga bisa bertindak (perintah /keluar untuk berhenti)
+  vibekit do "<tugas>"                  Mode agent sekali jalan: kerjakan tugas dengan tool file/perintah di folder ini
   vibekit status                        Status & pemakaian token tiap penyedia hari ini
   vibekit --help                        Tampilkan bantuan ini
   vibekit --version                     Tampilkan versi
@@ -37,11 +42,16 @@ Opsi ask:
   --file <path>    Lampirkan file sebagai konteks (boleh diulang)
   --dir <path>     Lampirkan isi folder sebagai konteks (boleh diulang)
 
-Mode agent (do):
-  Agent bekerja HANYA di folder tempat perintah dijalankan. Tool baca
-  (daftar_file, baca_file) berjalan langsung; tool yang mengubah sesuatu
-  (tulis_file, edit_file, jalankan_perintah) selalu meminta persetujuanmu
-  satu per satu — jawaban selain y/ya berarti ditolak. Batas 12 langkah.
+Kemampuan agent (ask, chat, do):
+  Sejak v0.3.0 ketiga perintah itu bisa bertindak, bukan hanya menjawab:
+  bila kamu meminta dibuatkan/diubah file atau menjalankan perintah, model
+  memakai tool di folder tempat perintah dijalankan. Tool baca (daftar_file,
+  baca_file) berjalan langsung; tool yang mengubah sesuatu (tulis_file,
+  edit_file, jalankan_perintah) selalu meminta persetujuanmu satu per satu
+  — jawaban selain y/ya berarti ditolak. Batas 12 langkah per giliran.
+  Perbedaannya: ask = satu pertanyaan yang boleh berakhir dengan aksi,
+  chat = percakapan yang bisa bertindak di tengah obrolan,
+  do = mode tugas sekali jalan dengan jejak langkah & ringkasan akhir.
   Contoh: vibekit do "buatkan file halo.txt berisi sapaan, lalu tampilkan daftar file di sini"
 
 Cara kerja singkat:
@@ -98,20 +108,54 @@ function uraiArgAsk(args: string[]): OpsiAsk | { error: string } {
   return { pertanyaan, files, dirs };
 }
 
-function tampilkanHasil(hasil: HasilTanya): number {
-  if (hasil.ok) {
-    console.log(hasil.jawaban);
-    const sumber = hasil.tokenSumber === "usage" ? "dari usage API" : "estimasi";
-    console.log(
-      `\n— dijawab oleh ${hasil.provider.nama} (${hasil.provider.model}) • ${formatAngka(hasil.tokenTerpakai)} token (${sumber})`
-    );
-    for (const c of hasil.catatan) {
-      console.error(`[vibekit] dilewati ${c.nama}: ${c.alasan}`);
-    }
-    return 0;
-  }
-  console.error(hasil.pesan);
-  return 1;
+/**
+ * Pembaca baris stdin yang serial: SATU antrean konsumen untuk semua
+ * kebutuhan (prompt utama chat maupun pertanyaan konfirmasi tool di tengah
+ * giliran), agar keduanya tidak berebut baris masukan. `tanya` menulis
+ * prompt lalu menunggu satu baris; mengembalikan null bila stdin berakhir
+ * (EOF) — pemanggil menafsirkannya sebagai berhenti (loop utama) atau
+ * menolak (konfirmasi), keduanya aman.
+ */
+interface PembacaBaris {
+  tanya: (prompt: string) => Promise<string | null>;
+  tutup: () => void;
+}
+
+function buatPembacaBaris(): PembacaBaris {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const antrian: string[] = [];
+  const penunggu: Array<(baris: string | null) => void> = [];
+  let berakhir = false;
+  rl.on("line", (baris) => {
+    const p = penunggu.shift();
+    if (p) p(baris);
+    else antrian.push(baris);
+  });
+  rl.on("close", () => {
+    berakhir = true;
+    while (penunggu.length > 0) (penunggu.shift() as (b: string | null) => void)(null);
+  });
+  return {
+    tanya: (prompt: string) => {
+      process.stdout.write(prompt);
+      const siap = antrian.shift();
+      if (siap !== undefined) return Promise.resolve(siap);
+      if (berakhir) return Promise.resolve(null);
+      return new Promise<string | null>((resolve) => penunggu.push(resolve));
+    },
+    tutup: () => rl.close(),
+  };
+}
+
+/** Pembuat callback konfirmasi bersama untuk do/ask/chat di atas satu PembacaBaris. */
+function buatKonfirmasi(pembaca: PembacaBaris): Konfirmasi {
+  return async (deskripsi: string): Promise<boolean> => {
+    console.log(`\n[vibekit] Usulan aksi:\n${deskripsi}`);
+    const jawaban = await pembaca.tanya("Jalankan? (y/N) ");
+    if (jawaban === null) return false; // EOF: tolak demi keamanan
+    const j = jawaban.trim().toLowerCase();
+    return j === "y" || j === "ya";
+  };
 }
 
 async function perintahAsk(args: string[]): Promise<number> {
@@ -145,12 +189,47 @@ async function perintahAsk(args: string[]): Promise<number> {
     for (const d of konteks.dilewati) console.error(`[vibekit] konteks dilewati: ${d}`);
   }
 
-  const hasil = await tanyaRouter({
-    config,
-    messages: [{ role: "user", content: isiUser }],
-    lokasiState: statePath(),
-  });
-  return tampilkanHasil(hasil);
+  // Sejak v0.3.0 ask menjalankan SATU giliran agent: pertanyaan biasa dijawab
+  // teks langsung, permintaan membuat file/perintah dijalankan lewat tool
+  // dengan konfirmasi — pagar keamanan yang sama seperti `do`.
+  const messages: ChatMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT_GABUNGAN },
+    { role: "user", content: isiUser },
+  ];
+  const pembaca = buatPembacaBaris();
+  try {
+    const hasil = await jalankanGiliran({
+      config,
+      messages,
+      lokasiState: statePath(),
+      cwd: process.cwd(),
+      konfirmasi: buatKonfirmasi(pembaca),
+      jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+    });
+    if (!hasil.ok) {
+      if (hasil.batasTercapai) {
+        console.error(
+          `[vibekit] Batas langkah tercapai (${hasil.jumlahLangkah} langkah) sebelum pertanyaan ini selesai dikerjakan. Persempit permintaanmu, atau gunakan vibekit do untuk mode tugas.`
+        );
+      } else {
+        console.error(hasil.pesanGagal ?? "[vibekit] Semua penyedia gagal atau sedang tidak tersedia.");
+      }
+      return 1;
+    }
+    console.log(hasil.jawabanAkhir);
+    if (hasil.providerTerakhir) {
+      const sumber = hasil.tokenSumber === "usage" ? "dari usage API" : "estimasi";
+      console.log(
+        `\n— dijawab oleh ${hasil.providerTerakhir.nama} (${hasil.providerTerakhir.model}) • ${formatAngka(hasil.totalToken)} token (${sumber})`
+      );
+    }
+    for (const c of hasil.catatan) {
+      console.error(`[vibekit] dilewati ${c.nama}: ${c.alasan}`);
+    }
+    return 0;
+  } finally {
+    pembaca.tutup();
+  }
 }
 
 async function perintahChat(): Promise<number> {
@@ -162,54 +241,54 @@ async function perintahChat(): Promise<number> {
     return 2;
   }
   console.log("VibeKit chat — ketik pertanyaan, /keluar untuk berhenti.");
-  const riwayat: ChatMessage[] = [];
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "kamu> " });
-  let rlDitutup = false;
-  rl.on("close", () => {
-    rlDitutup = true;
-  });
-  const promptAman = () => {
-    if (!rlDitutup) {
-      try {
-        rl.prompt();
-      } catch {
-        /* readline sudah tertutup (EOF) — abaikan */
+  console.log("Chat ini juga bisa bertindak: minta saja dibuatkan file atau menjalankan perintah — setiap aksi meminta persetujuanmu dulu.");
+  const riwayat: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT_GABUNGAN }];
+  const pembaca = buatPembacaBaris();
+  const konfirmasi = buatKonfirmasi(pembaca);
+  try {
+    for (;;) {
+      const barisMentah = await pembaca.tanya("kamu> ");
+      if (barisMentah === null) break; // stdin berakhir (EOF)
+      const baris = barisMentah.trim();
+      if (baris === "/keluar" || baris === "/exit") break;
+      if (!baris) continue;
+      riwayat.push({ role: "user", content: baris });
+
+      // Pangkas SADAR-TOOL: hanya pada batas giliran utuh, tidak pernah
+      // menyisakan pesan tool yatim atau tool_calls tanpa hasilnya.
+      const terpotong = pangkasRiwayatAman(riwayat, BATAS_TOKEN_RIWAYAT);
+      riwayat.splice(0, riwayat.length, ...terpotong);
+
+      const hasil = await jalankanGiliran({
+        config,
+        messages: riwayat,
+        lokasiState: statePath(),
+        cwd: process.cwd(),
+        konfirmasi,
+        jejak: (pesan) => console.error(`[vibekit] ${pesan}`),
+      });
+      if (hasil.ok) {
+        console.log(`\nvibekit (${hasil.providerTerakhir?.nama ?? "?"})> ${hasil.jawabanAkhir}\n`);
+      } else {
+        // Giliran gagal/batas tercapai: gulung balik SELURUH giliran ini
+        // (pesan user + rangkaian parsialnya) agar riwayat tetap bersih.
+        let idxUser = -1;
+        for (let i = riwayat.length - 1; i >= 0; i--) {
+          if (riwayat[i].role === "user") {
+            idxUser = i;
+            break;
+          }
+        }
+        if (idxUser >= 0) riwayat.length = idxUser;
+        const pesan = hasil.batasTercapai
+          ? `Batas langkah tercapai (${hasil.jumlahLangkah} langkah) pada giliran ini; giliran dibatalkan. Persempit permintaanmu.`
+          : (hasil.pesanGagal ?? "Semua penyedia gagal atau sedang tidak tersedia.");
+        console.error(`\n${pesan}\n`);
       }
     }
-  };
-  promptAman();
-  for await (const barisMentah of rl) {
-    const baris = barisMentah.trim();
-    if (baris === "/keluar" || baris === "/exit") break;
-    if (!baris) {
-      promptAman();
-      continue;
-    }
-    riwayat.push({ role: "user", content: baris });
-
-    // Jaga riwayat: buang giliran tertua sampai total token riwayat masuk akal.
-    while (
-      riwayat.length > 2 &&
-      hitungToken(riwayat.map((m) => m.content).join("\n")) > BATAS_TOKEN_RIWAYAT
-    ) {
-      riwayat.splice(0, 2);
-    }
-
-    const hasil = await tanyaRouter({
-      config,
-      messages: [...riwayat],
-      lokasiState: statePath(),
-    });
-    if (hasil.ok) {
-      riwayat.push({ role: "assistant", content: hasil.jawaban });
-      console.log(`\nvibekit (${hasil.provider.nama})> ${hasil.jawaban}\n`);
-    } else {
-      riwayat.pop(); // pertanyaan yang gagal tidak disimpan sebagai giliran selesai
-      console.error(`\n${hasil.pesan}\n`);
-    }
-    promptAman();
+  } finally {
+    pembaca.tutup();
   }
-  rl.close();
   return 0;
 }
 
@@ -231,15 +310,8 @@ async function perintahDo(args: string[]): Promise<number> {
   console.log(`Tugas: ${tugas}`);
   console.log("Tool baca berjalan langsung; tulis/edit file dan jalankan perintah meminta persetujuanmu satu per satu.\n");
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const konfirmasi = (deskripsi: string): Promise<boolean> =>
-    new Promise((resolve) => {
-      console.log(`\n[vibekit] Usulan aksi:\n${deskripsi}`);
-      rl.question("Jalankan? (y/N) ", (jawaban) => {
-        const j = jawaban.trim().toLowerCase();
-        resolve(j === "y" || j === "ya");
-      });
-    });
+  const pembaca = buatPembacaBaris();
+  const konfirmasi = buatKonfirmasi(pembaca);
 
   try {
     const hasil = await jalankanAgent({
@@ -257,7 +329,7 @@ async function perintahDo(args: string[]): Promise<number> {
     console.log(hasil.ringkasan);
     return hasil.ok ? 0 : 1;
   } finally {
-    rl.close();
+    pembaca.tutup();
   }
 }
 
