@@ -15,6 +15,7 @@
   },
   "files": [
     "dist",
+    "scripts",
     "README.md",
     "examples"
   ],
@@ -23,6 +24,7 @@
   "name": "@chispear/vibekit",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "postinstall": "node scripts/banner.js",
     "prepublishOnly": "npm run build",
     "start": "node dist/cli.js",
     "test": "npm run build && node --test test/*.test.mjs"

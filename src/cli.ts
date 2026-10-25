@@ -13,6 +13,7 @@ import {
   SYSTEM_PROMPT_GABUNGAN,
   type Konfirmasi,
 } from "./agent.js";
+import { teksBanner } from "./banner.js";
 import { bangunKonteks } from "./context.js";
 import {
   formatJam,
@@ -65,6 +66,7 @@ Cara kerja singkat:
 function perintahInit(): number {
   const dibuat = buatConfigGlobal();
   if (dibuat) {
+    console.log(teksBanner());
     console.log(`Konfigurasi dibuat: ${globalConfigPath()}`);
     console.log("Isi kolom \"apiKey\" untuk tiap penyedia yang ingin dipakai (atau pakai sintaks \"env:NAMA_VAR\").");
     console.log("Urutan penyedia = prioritas: yang pertama adalah bawaan, berikutnya cadangan failover.");
